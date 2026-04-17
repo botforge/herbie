@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-telegram-bot
+faster-whisper
+librosa
+openai
+python-dotenv
+numpy
+soundfile
+python-multipart
+aiofiles
+# silero-vad and torch removed — VAD only needed when librosa re-integrates (v2)

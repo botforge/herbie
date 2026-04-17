@@ -1,0 +1,17 @@
+{
+  "id": "4649852e",
+  "type": "audio",
+  "ext": "ogg",
+  "slug": "but-if-i-started-loop",
+  "tags": [
+    "vocal-hook",
+    "repetition",
+    "uncertainty",
+    "hospital"
+  ],
+  "parent_id": null,
+  "job_id": null,
+  "transcript": "But if I started... I did not think I would have started...",
+  "created_at": "2026-04-17T12:26:51.195838",
+  "_migrated_from": "hospital/but-if-i-started-loop_v1.ogg"
+}

@@ -1,0 +1,21 @@
+{
+  "id": "af5597d9",
+  "type": "text",
+  "ext": "txt",
+  "slug": "op1-pretty-random-loop-midi",
+  "tags": [
+    "sketches",
+    "op1",
+    "loop",
+    "sketch",
+    "organic",
+    "warm",
+    "midi"
+  ],
+  "parent_id": "6efc3ab5",
+  "job_id": null,
+  "transcript": "",
+  "text": "midi derived from op1-pretty-random-loop \u2014 24 notes",
+  "created_at": "2026-04-17T21:35:56.116191",
+  "midi_notes": "NOTE F3 0.000 0.500\nNOTE A3 0.500 0.500\nNOTE G3 1.000 0.250\nNOTE B3 1.250 0.250\nNOTE D3 1.500 0.500\nNOTE D3 2.000 0.250\nNOTE A3 2.250 0.500\nNOTE D3 2.750 1.000\nNOTE B3 3.750 0.250\nNOTE D3 4.000 1.000\nNOTE F4 5.000 0.500\nNOTE C3 5.500 0.250\nNOTE D4 5.750 0.500\nNOTE B3 6.250 0.250\nNOTE E4 6.500 0.500\nNOTE D3 7.000 0.250\nNOTE D3 7.250 0.250\nNOTE C4 7.500 1.000\nNOTE G3 8.500 0.500\nNOTE A3 9.250 0.250\nNOTE F4 9.500 0.250\nNOTE D4 10.000 0.250\nNOTE A3 10.250 0.250\nNOTE C4 10.500 0.500"
+}

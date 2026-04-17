@@ -1,0 +1,17 @@
+{
+  "id": "0f6ee938",
+  "type": "lyric",
+  "ext": "ogg",
+  "slug": "hospital-lyrics-v1",
+  "tags": [
+    "hospital",
+    "lyrics",
+    "vocal-memo",
+    "raw"
+  ],
+  "parent_id": null,
+  "job_id": null,
+  "transcript": "So these are potential hospital lyrics. It's like don't cause a scene of it's wasted on us. I'm done with the bullshit you keep spitting out. I run through these fields like Saving on us. I try not to scream but it keeps slipping out. Maybe I'm not sure.",
+  "created_at": "2026-04-17T10:52:04.931974",
+  "_migrated_from": "hospital/hospital-lyrics-v1_v1.ogg"
+}

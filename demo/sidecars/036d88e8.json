@@ -1,0 +1,19 @@
+{
+  "id": "036d88e8",
+  "type": "text",
+  "ext": "txt",
+  "slug": "oppi-1-idea-voice-note-midi",
+  "tags": [
+    "sketches",
+    "voice-note",
+    "op1",
+    "sketch",
+    "midi"
+  ],
+  "parent_id": "c371235f",
+  "job_id": null,
+  "transcript": "",
+  "text": "midi derived from oppi-1-idea-voice-note \u2014 24 notes",
+  "created_at": "2026-04-17T23:13:42.603299",
+  "midi_notes": "NOTE F4 0.000 1.000\nNOTE Ab3 1.250 0.500\nNOTE Bb3 1.750 0.500\nNOTE C4 2.500 0.500\nNOTE G4 3.000 0.500\nNOTE D3 3.500 0.250\nNOTE D3 3.750 0.250\nNOTE C4 4.000 1.000\nNOTE C4 5.000 0.250\nNOTE D4 5.250 0.500\nNOTE F4 5.750 1.000\nNOTE C4 6.750 0.500\nNOTE Eb3 7.500 0.250\nNOTE G4 7.750 0.250\nNOTE G3 8.250 0.500\nNOTE Eb4 8.750 0.250\nNOTE F3 9.000 1.000\nNOTE C3 10.000 0.500\nNOTE F3 10.500 0.500\nNOTE Ab3 11.000 0.500\nNOTE Eb4 11.500 1.000\nNOTE Ab3 12.750 0.500\nNOTE Bb3 13.500 0.500\nNOTE G3 14.000 0.500"
+}

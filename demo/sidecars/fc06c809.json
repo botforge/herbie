@@ -1,0 +1,17 @@
+{
+  "id": "fc06c809",
+  "type": "text",
+  "ext": "txt",
+  "slug": "monastery-chords",
+  "tags": [
+    "monastery",
+    "midi",
+    "chords"
+  ],
+  "parent_id": null,
+  "job_id": null,
+  "transcript": "",
+  "text": "chord render: Em - G - B - C",
+  "created_at": "2026-04-17T21:27:34.419394",
+  "midi_notes": "NOTE E3 0.000 1.000\nNOTE G3 0.000 1.000\nNOTE B3 0.000 1.000\nNOTE G3 1.000 1.000\nNOTE B3 1.000 1.000\nNOTE D4 1.000 1.000\nNOTE B3 2.000 1.000\nNOTE Eb4 2.000 1.000\nNOTE F#4 2.000 1.000\nNOTE C3 3.000 1.000\nNOTE E3 3.000 1.000\nNOTE G3 3.000 1.000"
+}

@@ -1,0 +1,18 @@
+{
+  "id": "8b301bdc",
+  "type": "text",
+  "ext": "txt",
+  "slug": "boom-percussion-midi",
+  "tags": [
+    "seminal",
+    "foley",
+    "percussion",
+    "sketch",
+    "midi"
+  ],
+  "parent_id": "4cd8fdf9",
+  "job_id": null,
+  "transcript": "",
+  "text": "NOTE D3 0.000 1.000\nNOTE C3 1.000 0.500\nNOTE F4 1.500 0.500\nNOTE G3 2.250 0.250\nNOTE A3 2.500 0.500\nNOTE E4 3.000 0.500\nNOTE F3 3.500 0.250\nNOTE F3 3.750 0.500\nNOTE F3 4.500 0.250\nNOTE G3 4.750 1.000\nNOTE A3 5.750 1.000\nNOTE D4 6.750 0.250\nNOTE D4 7.000 1.000\nNOTE F4 8.000 0.500\nNOTE E4 8.500 0.250\nNOTE G4 8.750 0.250\nNOTE G3 9.000 0.500\nNOTE C3 9.500 0.250\nNOTE E4 9.750 0.250\nNOTE D3 10.000 0.250\nNOTE A3 10.250 0.500\nNOTE E4 10.750 1.000\nNOTE C4 11.750 1.000\nNOTE E3 12.750 0.500",
+  "created_at": "2026-04-17T20:29:25.342716"
+}

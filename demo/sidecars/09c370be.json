@@ -1,0 +1,17 @@
+{
+  "id": "09c370be",
+  "type": "text",
+  "ext": "txt",
+  "slug": "sketches-chords",
+  "tags": [
+    "sketches",
+    "midi",
+    "chords"
+  ],
+  "parent_id": null,
+  "job_id": null,
+  "transcript": "",
+  "text": "chord render: Eb - Eb - Dm7 - BbMaj7/D",
+  "created_at": "2026-04-18T01:16:15.760881",
+  "midi_notes": "NOTE Eb3 0.000 1.000\nNOTE G3 0.000 1.000\nNOTE Bb3 0.000 1.000\nNOTE Eb3 1.000 1.000\nNOTE G3 1.000 1.000\nNOTE Bb3 1.000 1.000\nNOTE D3 2.000 1.000\nNOTE F3 2.000 1.000\nNOTE A3 2.000 1.000\nNOTE C4 2.000 1.000\nNOTE Bb3 3.000 1.000\nNOTE D4 3.000 1.000\nNOTE F4 3.000 1.000"
+}

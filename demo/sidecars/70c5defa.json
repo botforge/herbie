@@ -1,0 +1,19 @@
+{
+  "id": "70c5defa",
+  "type": "text",
+  "ext": "txt",
+  "slug": "op1-random-sketch-midi",
+  "tags": [
+    "sketches",
+    "op1",
+    "sketch",
+    "melody",
+    "midi"
+  ],
+  "parent_id": "45775a11",
+  "job_id": null,
+  "transcript": "",
+  "text": "midi derived from op1-random-sketch \u2014 24 notes",
+  "created_at": "2026-04-18T01:07:57.367907",
+  "midi_notes": "NOTE Bb4 0.000 0.250\nNOTE F4 0.250 0.250\nNOTE Eb3 0.500 0.250\nNOTE C4 0.750 1.000\nNOTE G3 1.750 0.500\nNOTE G4 2.250 0.250\nNOTE G4 2.500 0.500\nNOTE F4 3.250 0.500\nNOTE F3 3.750 0.500\nNOTE G3 4.250 0.250\nNOTE F4 4.500 0.500\nNOTE F4 5.000 0.500\nNOTE F4 5.750 1.000\nNOTE Bb4 6.750 0.250\nNOTE Eb4 7.000 0.250\nNOTE C4 7.250 0.500\nNOTE G3 8.000 0.500\nNOTE C4 8.500 0.500\nNOTE Eb3 9.000 1.000\nNOTE Eb3 10.000 1.000\nNOTE Bb3 11.000 1.000\nNOTE C4 12.250 1.000\nNOTE F3 13.250 0.250\nNOTE F4 13.500 0.500"
+}

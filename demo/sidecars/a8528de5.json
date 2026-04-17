@@ -1,0 +1,19 @@
+{
+  "id": "a8528de5",
+  "type": "text",
+  "ext": "txt",
+  "slug": "random-rhythm-vocal-midi",
+  "tags": [
+    "voice-note",
+    "rhythm",
+    "vocal",
+    "monastery",
+    "midi"
+  ],
+  "parent_id": "504ee9b7",
+  "job_id": null,
+  "transcript": "",
+  "text": "midi derived from random-rhythm-vocal \u2014 24 notes",
+  "created_at": "2026-04-17T20:33:34.217547",
+  "midi_notes": "NOTE A3 0.000 0.500\nNOTE E3 0.750 0.500\nNOTE G4 1.500 0.500\nNOTE G4 2.000 0.500\nNOTE E3 2.500 0.500\nNOTE D4 3.000 1.000\nNOTE C4 4.000 0.500\nNOTE D4 4.750 0.500\nNOTE E3 5.500 0.500\nNOTE F4 6.250 0.250\nNOTE E4 6.750 1.000\nNOTE F4 7.750 0.250\nNOTE D4 8.000 0.250\nNOTE C4 8.500 0.250\nNOTE C3 8.750 0.250\nNOTE F3 9.000 0.250\nNOTE D4 9.250 0.500\nNOTE A3 9.750 0.500\nNOTE C3 10.500 0.500\nNOTE G3 11.000 0.500\nNOTE E4 11.750 0.250\nNOTE C4 12.250 1.000\nNOTE A3 13.250 0.500\nNOTE G4 13.750 1.000"
+}

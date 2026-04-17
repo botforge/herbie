@@ -1,0 +1,1620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Herbie</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/wavesurfer.js@7.8.12/dist/wavesurfer.min.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --black:  #0d0d0d;
+  --white:  #ffffff;
+  --gray:   #666;
+  --mid:    #999;
+  --faint:  #c8c8c8;
+  --line:   #e4e4e4;
+  --bg:     #ffffff;
+  --font:   "DejaVu Sans Mono", "JetBrains Mono", "Cascadia Code", monospace;
+  --title-font: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --header: 40px;
+  --sidebar: 260px;
+  --chat:   340px;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--black);
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+#header {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--header);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  padding: 0;
+  z-index: 200;
+  gap: 0;
+}
+
+#header-title {
+  width: var(--sidebar);
+  min-width: var(--sidebar);
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-right: 1px solid var(--line);
+  height: 100%;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+#header-search {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  gap: 7px;
+  height: 100%;
+}
+
+#search-input {
+  flex: 1;
+  font-family: var(--font);
+  font-size: 9.5px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--black);
+}
+#search-input::placeholder { color: var(--faint); }
+
+#search-clear {
+  font-family: var(--font);
+  font-size: 9.5px;
+  color: var(--mid);
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  display: none;
+}
+#search-clear.visible { display: block; }
+#search-clear:hover { color: var(--black); }
+
+#header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  height: 100%;
+  padding-right: 0;
+  flex-shrink: 0;
+}
+
+/* placeholder SVG icon buttons in header */
+.hdr-icon {
+  width: 22px;
+  height: 22px;
+  cursor: pointer;
+  opacity: 0.45;
+  flex-shrink: 0;
+}
+.hdr-icon:hover { opacity: 0.85; }
+
+/* active tag badge */
+#active-filter {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--gray);
+  padding: 0 10px;
+}
+#active-filter.visible { display: flex; }
+#active-filter-pill {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 2px;
+  font-family: var(--font);
+}
+#clear-filter-btn {
+  background: none; border: none; cursor: pointer;
+  color: var(--mid); font-size: 12px; padding: 0;
+  line-height: 1;
+}
+#clear-filter-btn:hover { color: var(--black); }
+
+/* ── Shell ──────────────────────────────────────────────────────────────── */
+
+#shell {
+  display: flex;
+  position: fixed;
+  top: var(--header);
+  left: 0; right: 0; bottom: 0;
+}
+
+/* ── Sidebar ────────────────────────────────────────────────────────────── */
+
+#sidebar {
+  width: var(--sidebar);
+  min-width: var(--sidebar);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+/* large SVG art block at top of sidebar */
+#sidebar-art {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+  object-fit: contain;
+}
+
+#sidebar-statement {
+  padding: 12px 14px 14px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--gray);
+  line-height: 1.65;
+}
+
+#sidebar-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+#sidebar-section-head .label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--black);
+}
+
+#sidebar-section-head .view-all {
+  font-size: 12px;
+  color: var(--mid);
+  cursor: pointer;
+  text-decoration: none;
+}
+#sidebar-section-head .view-all:hover { color: var(--black); }
+
+#projects-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+
+.tag-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  transition: background 0.07s;
+}
+.tag-row:hover,
+.tag-row.active { background: #f6f6f6; }
+
+.tag-row-svg {
+  width: 28px;
+  height: 20px;
+  flex-shrink: 0;
+  display: block;
+  overflow: visible;
+}
+
+.tag-row-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--black);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tag-row.active .tag-row-name { font-weight: 800; }
+
+.tag-row-count {
+  font-size: 12px;
+  color: var(--faint);
+  flex-shrink: 0;
+}
+
+.sidebar-empty {
+  padding: 20px 14px;
+  font-size: 10px;
+  color: var(--faint);
+}
+
+/* ── Feed column ─────────────────────────────────────────────────────────── */
+
+#feed-col {
+  flex: 1;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+/* ── Date group ──────────────────────────────────────────────────────────── */
+
+.date-group {}
+
+.date-header {
+  padding: 14px 16px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mid);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 10;
+}
+
+/* ── Entry row ───────────────────────────────────────────────────────────── */
+
+.entry {
+  display: grid;
+  grid-template-columns: 68px 1fr;
+  gap: 0 12px;
+  padding: 10px 16px 10px 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  outline: none;
+  border-left: 2px solid transparent;
+  transition: background 0.07s, border-color 0.07s;
+  position: relative;
+}
+
+.entry-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 2px;
+}
+
+.entry-action {
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1;
+  color: var(--faint);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 2px;
+  opacity: 0;
+  transition: opacity 0.1s, color 0.1s, background 0.1s;
+}
+.entry:hover .entry-action,
+.entry.focused .entry-action { opacity: 0.55; }
+.entry-action:hover {
+  opacity: 1 !important;
+  color: var(--black);
+  background: var(--line);
+}
+.entry-action.delete:hover {
+  color: #c33;
+  background: #fbeaea;
+}
+
+.entry:hover { background: #fafafa; }
+.entry.focused {
+  background: #f5f5f5;
+  border-left-color: var(--black);
+}
+.entry[draggable="true"] { cursor: grab; }
+.entry[draggable="true"]:active { cursor: grabbing; }
+
+/* left: timestamp */
+.entry-ts {
+  font-size: 10px;
+  color: var(--mid);
+  padding-top: 1px;
+  line-height: 1.5;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* right: content */
+.entry-content {}
+
+.entry-body {
+  font-size: 13px;
+  color: var(--black);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 1.4em;
+  outline: none;
+  border-bottom: 1px solid transparent;
+}
+
+.entry-body:focus {
+  border-bottom-color: var(--faint);
+}
+
+.entry-body:empty::before {
+  content: attr(data-placeholder);
+  color: var(--faint);
+  pointer-events: none;
+  font-style: italic;
+}
+
+/* transcript shown in italic / muted */
+.entry-body.transcript {
+  color: var(--gray);
+  font-style: italic;
+  font-size: 9.5px;
+}
+.entry-body.transcript:focus { font-style: normal; color: var(--black); }
+
+.entry-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.entry-slug {
+  font-size: 15px;
+  color: var(--black);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  margin-bottom: 5px;
+  line-height: 1.3;
+}
+
+.tag {
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: opacity 0.1s;
+}
+.tag:hover { opacity: 0.72; }
+
+/* waveform player */
+.wf-player {
+  margin-top: 8px;
+}
+.wf-wave {
+  width: 100%;
+  min-height: 48px;
+  background: #f8f8f8;
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+.wf-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.wf-btn {
+  font-family: var(--font);
+  font-size: 10px;
+  background: none;
+  border: 1px solid var(--black);
+  color: var(--black);
+  cursor: pointer;
+  padding: 1px 7px;
+  line-height: 1.6;
+}
+.wf-btn:hover { background: var(--line); }
+.wf-time-display {
+  font-size: 9.5px;
+  color: var(--mid);
+}
+
+/* MIDI piano-roll canvas */
+.midi-canvas {
+  width: 100%;
+  height: 80px;
+  display: block;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  background: #f8f8f8;
+  image-rendering: pixelated;
+}
+
+/* tag edit (focused only) */
+.tag-edit-row {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+.entry.focused .tag-edit-row { display: flex; }
+
+.tag-edit-input {
+  font-family: var(--font);
+  font-size: 10px;
+  border: none;
+  border-bottom: 1px solid var(--faint);
+  outline: none;
+  background: transparent;
+  color: var(--black);
+  flex: 1;
+  padding: 1px 0;
+}
+.tag-edit-input::placeholder { color: var(--faint); }
+
+.tag-save-btn {
+  font-family: var(--font);
+  font-size: 12px;
+  border: 1px solid var(--black);
+  background: transparent;
+  cursor: pointer;
+  padding: 1px 7px;
+  color: var(--black);
+}
+.tag-save-btn:hover { background: var(--line); }
+
+/* derived / job badges */
+.entry-parent {
+  font-size: 12px;
+  color: var(--faint);
+  margin-bottom: 3px;
+}
+.entry-job {
+  font-size: 12px;
+  color: var(--mid);
+  margin-bottom: 3px;
+}
+
+/* feed empty states */
+.feed-state {
+  padding: 60px 20px;
+  color: var(--faint);
+  font-size: 9.5px;
+  text-align: center;
+}
+
+/* ── Chat column ─────────────────────────────────────────────────────────── */
+
+#chat-col {
+  width: var(--chat);
+  min-width: var(--chat);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+/* draggable resize handle sitting on the left edge of the chat column */
+#chat-resize {
+  position: absolute;
+  top: 0; left: -3px; bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 150;
+  background: transparent;
+  transition: background 0.1s;
+}
+#chat-resize:hover,
+#chat-resize.dragging { background: rgba(0,0,0,0.08); }
+body.resizing { cursor: col-resize; user-select: none; }
+
+#chat-header {
+  padding: 10px 14px 9px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-shrink: 0;
+}
+#chat-header .title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+#chat-header .sub {
+  font-size: 12px;
+  color: var(--mid);
+}
+
+#chat-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.chat-msg { font-size: 13px; }
+.chat-msg .sender {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+.chat-msg .body {
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-msg.herbie .body { color: var(--black); }
+.chat-msg.you    .body { color: var(--gray); }
+.chat-msg .body a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--faint);
+  text-underline-offset: 2px;
+}
+.chat-msg .body a:hover { text-decoration-color: var(--black); }
+
+/* inline audio player inside a chat message */
+.chat-wf {
+  margin: 6px 0 10px;
+}
+.chat-wf .wf-wave {
+  min-height: 40px;
+}
+.chat-wf .wf-controls { margin-top: 3px; }
+
+#chat-input-wrap {
+  border-top: 1px solid var(--line);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+#chat-input {
+  font-family: var(--font);
+  font-size: 9.5px;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  outline: none;
+  background: transparent;
+  color: var(--black);
+  padding: 2px 0;
+  resize: none;
+  line-height: 1.5;
+}
+#chat-input::placeholder { color: var(--faint); }
+
+#chat-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+#upload-status {
+  font-size: 10px;
+  color: var(--gray);
+  flex: 1;
+}
+
+.btn {
+  font-family: var(--font);
+  font-size: 12px;
+  border: 1px solid var(--black);
+  background: transparent;
+  cursor: pointer;
+  padding: 2px 9px;
+  color: var(--black);
+  letter-spacing: 0.03em;
+}
+.btn:hover { background: var(--line); }
+.btn.primary { background: var(--black); color: var(--white); }
+.btn.primary:hover { background: #222; }
+
+#file-input { display: none; }
+
+/* ── Scrollbars ──────────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line); }
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<header id="header">
+  <div id="header-title">Herbie</div>
+
+  <div id="header-search">
+    <!-- search icon placeholder SVG -->
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style="flex-shrink:0;opacity:.4">
+      <circle cx="5.5" cy="5.5" r="4.5" stroke="#0d0d0d" stroke-width="1.2"/>
+      <line x1="9" y1="9" x2="12.5" y2="12.5" stroke="#0d0d0d" stroke-width="1.2" stroke-linecap="round"/>
+    </svg>
+    <input id="search-input" type="text" placeholder="search" autocomplete="off" spellcheck="false">
+    <button id="search-clear" onclick="clearSearch()">×</button>
+    <div id="active-filter">
+      <span>tag:</span>
+      <span id="active-filter-pill"></span>
+      <button id="clear-filter-btn" onclick="clearFilter()">×</button>
+    </div>
+  </div>
+
+  <div id="header-actions">
+    <!-- placeholder SVG icons — swap these out -->
+    <svg class="hdr-icon" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">
+      <rect x="1" y="1" width="20" height="20" rx="2" fill="none" stroke="#0d0d0d" stroke-width="1.3"/>
+      <line x1="1" y1="1" x2="21" y2="21" stroke="#0d0d0d" stroke-width="1"/>
+    </svg>
+    <svg class="hdr-icon" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="11" cy="11" r="9.5" fill="none" stroke="#0d0d0d" stroke-width="1.3"/>
+      <line x1="1.5" y1="11" x2="20.5" y2="11" stroke="#0d0d0d" stroke-width="1"/>
+      <path d="M11 1.5 Q15 11 11 20.5 Q7 11 11 1.5Z" fill="none" stroke="#0d0d0d" stroke-width="1"/>
+    </svg>
+    <svg class="hdr-icon" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">
+      <path d="M2 19 L9 12 M2 3 L20 11 L2 19 Z" fill="none" stroke="#0d0d0d" stroke-width="1.3" stroke-linejoin="round"/>
+    </svg>
+  </div>
+</header>
+
+<!-- ── Shell ───────────────────────────────────────────────────────────── -->
+<div id="shell">
+
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <img id="sidebar-art" src="/angel.svg" alt="">
+
+
+    <div id="sidebar-statement">
+      Herbie is a personal music archivist that lives in your messaging app. You send voice notes, audio files, and half-formed ideas. Herbie transcribes, names, files, versions, and connects everything — then hands you tools when you need them. It never makes music for you. It makes sure nothing you make gets lost, and it knows enough about music history and theory to point you in the right direction.
+    </div>
+
+    <div id="sidebar-section-head">
+      <span class="label">Gradients</span>
+      <a class="view-all" onclick="clearFilter()">View all</a>
+    </div>
+
+    <div id="projects-list">
+      <div class="sidebar-empty">no gradients yet</div>
+    </div>
+  </aside>
+
+  <!-- Feed -->
+  <main id="feed-col">
+    <div id="feed-scroll"></div>
+  </main>
+
+  <!-- Chat -->
+  <aside id="chat-col">
+    <div id="chat-resize" title="drag to resize"></div>
+    <div id="chat-header">
+      <span class="title">Herbie</span>
+      <span class="sub">archivist</span>
+    </div>
+    <div id="chat-log"></div>
+    <div id="chat-input-wrap">
+      <textarea id="chat-input" rows="3" placeholder="message or voice note…"></textarea>
+      <div id="chat-actions">
+        <span id="upload-status"></span>
+        <button class="btn" id="upload-btn">+ audio</button>
+        <button class="btn primary" id="send-btn">send</button>
+      </div>
+    </div>
+    <input id="file-input" type="file" accept="audio/*">
+  </aside>
+
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+
+const S = {
+  all: [],
+  shown: [],
+  focusIdx: -1,
+  activeTag: '',
+  searchQ: '',
+  conversationId: 'web-' + Math.random().toString(36).slice(2, 10),
+  saveTimers: {},
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tag colors
+// ─────────────────────────────────────────────────────────────────────────────
+
+const HUES = [210, 28, 120, 270, 0, 178, 55, 305, 148, 235, 340, 85];
+
+function tagHue(tag) {
+  let h = 0;
+  for (const c of tag) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return HUES[h % HUES.length];
+}
+
+function tagStyle(tag) {
+  const hue = tagHue(tag);
+  return `background:hsl(${hue},45%,91%);color:hsl(${hue},52%,30%);border-color:hsl(${hue},35%,80%)`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Load feed + projects
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function loadFeed() {
+  const scroll = document.getElementById('feed-scroll');
+  try {
+    const events = await api('/feed?limit=500');
+    S.all = events;
+    applyFilters();
+    loadProjects();
+  } catch (e) {
+    scroll.innerHTML = `<div class="feed-state">${esc(e.message)}</div>`;
+  }
+}
+
+async function loadProjects() {
+  try {
+    const tags = await api('/tags');
+    renderSidebar(tags);
+  } catch (_) {}
+}
+
+function gradientSwatchSVG(tag) {
+  // Seed a small PRNG from the tag string so each tag has a stable,
+  // reproducible shape — like a sigil.
+  let s = 0;
+  for (const c of tag) s = (s * 31 + c.charCodeAt(0)) >>> 0;
+  const rand = () => {
+    s = (s * 1103515245 + 12345) >>> 0;
+    return (s >>> 16) / 65535;
+  };
+
+  const h1  = tagHue(tag);
+  const h2  = (h1 + 38) % 360;
+  const gid = 'sw_' + Math.abs(s).toString(36).slice(0, 8);
+
+  // Spectrogram-like silhouette: columns of varying heights, slightly
+  // deteriorated bottom edge — reads as a weird little medieval frieze.
+  const cols = 8;
+  const cw   = 100 / cols;
+  const tops = Array.from({length: cols}, () => 14 + rand() * 55);
+  const bots = Array.from({length: cols}, () => 92 + rand() * 7);
+
+  let d = `M0,${bots[0].toFixed(1)}`;
+  for (let i = 0; i < cols; i++) {
+    d += ` L${((i + 1) * cw).toFixed(1)},${bots[i].toFixed(1)}`;
+  }
+  d += ` L100,${tops[cols - 1].toFixed(1)}`;
+  for (let i = cols - 1; i >= 0; i--) {
+    const x = (i * cw).toFixed(1);
+    d += ` L${((i + 1) * cw).toFixed(1)},${tops[i].toFixed(1)} L${x},${tops[i].toFixed(1)}`;
+  }
+  d += ' Z';
+
+  return `<svg class="tag-row-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
+    <defs>
+      <linearGradient id="${gid}" x1="0" y1="1" x2="0" y2="0">
+        <stop offset="0%" stop-color="hsl(${h2},55%,42%)"/>
+        <stop offset="100%" stop-color="hsl(${h1},62%,66%)"/>
+      </linearGradient>
+    </defs>
+    <path d="${d}" fill="url(#${gid})"/>
+  </svg>`;
+}
+
+function renderSidebar(tags) {
+  const list = document.getElementById('projects-list');
+  if (!tags.length) {
+    list.innerHTML = '<div class="sidebar-empty">no gradients yet</div>';
+    return;
+  }
+  list.innerHTML = tags.map(t => {
+    const active = S.activeTag === t.tag ? ' active' : '';
+    return `<div class="tag-row${active}" onclick="filterByTag('${esc(t.tag)}')">
+      ${gradientSwatchSVG(t.tag)}
+      <span class="tag-row-name">${esc(t.tag)}</span>
+      <span class="tag-row-count">${t.count}</span>
+    </div>`;
+  }).join('');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Filter + search
+// ─────────────────────────────────────────────────────────────────────────────
+
+function applyFilters() {
+  let items = S.all;
+
+  if (S.activeTag) {
+    items = items.filter(e => (e.tags || []).includes(S.activeTag));
+  }
+
+  if (S.searchQ) {
+    const q = S.searchQ.toLowerCase();
+    items = items.filter(e => {
+      const hay = [
+        e.slug || '',
+        (e.tags || []).join(' '),
+        e.transcript || '',
+        e.text || '',
+      ].join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+  }
+
+  S.shown = items;
+  S.focusIdx = items.length ? 0 : -1;
+  renderFeed();
+  updateHeader();
+}
+
+function updateHeader() {
+  const filterDiv = document.getElementById('active-filter');
+  const pill      = document.getElementById('active-filter-pill');
+  if (S.activeTag) {
+    pill.textContent = S.activeTag;
+    pill.style.cssText = tagStyle(S.activeTag);
+    filterDiv.classList.add('visible');
+  } else {
+    filterDiv.classList.remove('visible');
+  }
+  document.getElementById('search-clear').classList.toggle('visible', !!S.searchQ);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Render feed  (date-grouped)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function renderFeed() {
+  const scroll = document.getElementById('feed-scroll');
+  if (!S.shown.length) {
+    const msg = S.activeTag || S.searchQ
+      ? `no entries for "${S.activeTag || S.searchQ}"`
+      : 'archive is empty — send a voice note or message';
+    scroll.innerHTML = `<div class="feed-state">${esc(msg)}</div>`;
+    return;
+  }
+
+  // Group by calendar day
+  const dayMap = new Map(); // "Fri Apr 17 2026" -> [{ev, idx}, ...]
+  S.shown.forEach((ev, i) => {
+    const d = ev.created_at ? new Date(ev.created_at) : new Date(0);
+    const key = d.toDateString();
+    if (!dayMap.has(key)) dayMap.set(key, { date: d, items: [] });
+    dayMap.get(key).items.push({ ev, i });
+  });
+
+  // Sort days newest first
+  const days = Array.from(dayMap.values()).sort((a, b) => b.date - a.date);
+
+  let html = '';
+  for (const { date, items } of days) {
+    html += `<div class="date-group">
+      <div class="date-header">${formatDateHeader(date)}</div>
+      ${items.map(({ ev, i }) => entryHTML(ev, i)).join('')}
+    </div>`;
+  }
+  destroyAllWaveforms();
+  scroll.innerHTML = html;
+  if (S.focusIdx >= 0) focusEntry(S.focusIdx, false);
+  initWaveforms();
+  initMidiGrids();
+}
+
+function formatDateHeader(d) {
+  const DAY = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
+  const MON = ['JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE',
+               'JULY','AUGUST','SEPTEMBER','OCTOBER','NOVEMBER','DECEMBER'];
+  return `${DAY[d.getDay()]}, ${MON[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+}
+
+function relativeTime(iso) {
+  if (!iso) return '';
+  try {
+    const d   = new Date(iso);
+    const now = new Date();
+    const ms  = now - d;
+    const mins   = Math.floor(ms / 60000);
+    const hours  = Math.floor(ms / 3600000);
+    const days   = Math.floor(ms / 86400000);
+    const months = Math.floor(days / 30.44);
+    const years  = Math.floor(days / 365.25);
+    if (ms < 60000)   return 'just now';
+    if (hours < 1)    return `${mins}m ago`;
+    if (days < 1) {
+      // same day → show clock time
+      return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+    if (days < 30)    return `${days}d ago`;
+    if (months < 12)  return `${months}mo ago`;
+    return `${years}y ago`;
+  } catch (_) { return ''; }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entry HTML
+// ─────────────────────────────────────────────────────────────────────────────
+
+function entryHTML(ev, i) {
+  const type    = ev.type || 'audio';
+  const slug    = ev.slug || ev.file_id || '—';
+  const tags    = ev.tags || [];
+  const fileId  = ev.file_id || '';
+  const ext     = ev.ext || 'ogg';
+  const focused = i === S.focusIdx;
+
+  const ts = relativeTime(ev.created_at);
+
+  const isAudio = type === 'audio';
+  const isText  = type === 'text' || type === 'lyric';
+  const isMidi  = tags.includes('midi');
+
+  // body content
+  const rawBody = isText ? (ev.text || '') : (ev.transcript || '');
+  const bodyClass = isAudio ? 'entry-body transcript' : 'entry-body';
+  const bodyPlaceholder = isAudio ? 'transcript…' : '';
+
+  const tagsHTML = tags.map(t =>
+    `<button class="tag" style="${tagStyle(t)}"
+       onclick="event.stopPropagation();filterByTag('${esc(t)}')">${esc(t)}</button>`
+  ).join('');
+
+  // Waveform player (replaces <audio controls>)
+  let playerHTML = '';
+  if (isAudio && fileId) {
+    playerHTML = `
+      <div class="wf-player">
+        <div class="wf-wave" data-waveform="${esc(fileId)}"></div>
+        <div class="wf-controls">
+          <button class="wf-btn" data-wfbtn="${esc(fileId)}"
+            onclick="event.stopPropagation();toggleWave('${esc(fileId)}')">▶</button>
+          <span class="wf-time-display" data-wftime="${esc(fileId)}">0:00</span>
+        </div>
+      </div>`;
+  }
+  // MIDI piano-roll canvas (for midi-tagged text entries)
+  const midiData = ev.midi_notes || (isMidi ? rawBody : '');
+  if (isMidi && isText && midiData) {
+    playerHTML = `<canvas class="midi-canvas"
+      data-midi="${esc(midiData)}"
+      data-fileid="${esc(fileId)}"></canvas>`;
+  }
+
+  const parentBadge = ev.parent_id
+    ? `<div class="entry-parent">↳ ${esc(ev.parent_id)}</div>` : '';
+
+  const jobBadge = ev.type === 'job_queued'
+    ? `<div class="entry-job">⏳ ${esc(ev.job_type)}</div>`
+    : ev.type === 'job_done'
+    ? `<div class="entry-job">✓ ${esc(ev.job_type)}</div>` : '';
+
+  // Drag-out: audio entries drag as their raw file; midi entries drag as
+  // an on-the-fly .mid. Both use the Chrome DownloadURL protocol so DAWs
+  // receive an actual file (not just a URL).
+  let draggable = '', ondragstart = '';
+  if (isMidi && fileId) {
+    draggable   = 'draggable="true"';
+    ondragstart = `ondragstart="onMidiDragStart(event,'${esc(fileId)}','${esc(slug)}')"`;
+  } else if (isAudio && fileId) {
+    draggable   = 'draggable="true"';
+    ondragstart = `ondragstart="onAudioDragStart(event,'${esc(fileId)}','${esc(ext)}','${esc(slug)}')"`;
+  }
+
+  return `
+<div class="entry${focused ? ' focused' : ''}"
+     data-idx="${i}" data-file-id="${esc(fileId)}"
+     tabindex="-1"
+     ${draggable} ${ondragstart}
+     onclick="clickEntry(${i})">
+
+  <div class="entry-actions">
+    <button class="entry-action reveal" title="show in Finder"
+            onclick="event.stopPropagation();revealEntry('${esc(fileId)}')">↗</button>
+    <button class="entry-action delete" title="delete"
+            onclick="event.stopPropagation();deleteEntry('${esc(fileId)}')">×</button>
+  </div>
+
+  <div class="entry-ts">${esc(ts)}</div>
+
+  <div class="entry-content">
+    <div class="entry-slug">${esc(slug)}</div>
+    ${parentBadge}${jobBadge}
+
+    <div class="${bodyClass}"
+         contenteditable="true"
+         spellcheck="false"
+         data-file-id="${esc(fileId)}"
+         data-field="${isText ? 'text' : 'transcript'}"
+         data-placeholder="${esc(bodyPlaceholder)}"
+         onclick="event.stopPropagation()"
+         oninput="scheduleBodySave(this)"
+    >${esc(rawBody)}</div>
+
+    ${playerHTML}
+
+    <div class="entry-meta">
+      ${tagsHTML}
+    </div>
+
+    <div class="tag-edit-row">
+      <input class="tag-edit-input" type="text"
+             value="${esc(tags.join(', '))}"
+             placeholder="tag1, tag2, …"
+             onclick="event.stopPropagation()">
+      <button class="tag-save-btn"
+              onclick="event.stopPropagation();saveTagsFromRow(this,'${esc(fileId)}')">save</button>
+    </div>
+  </div>
+
+</div>`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WaveSurfer management
+// ─────────────────────────────────────────────────────────────────────────────
+
+const WS = new Map(); // fileId → WaveSurfer instance
+
+function destroyAllWaveforms() {
+  WS.forEach(ws => { try { ws.destroy(); } catch(_) {} });
+  WS.clear();
+}
+
+function initWaveforms() {
+  document.querySelectorAll('[data-waveform]').forEach(container => {
+    const fid = container.dataset.waveform;
+    if (WS.has(fid)) return;
+    const ws = WaveSurfer.create({
+      container,
+      waveColor:     '#c8c8c8',
+      progressColor: '#0d0d0d',
+      cursorColor:   '#0d0d0d',
+      cursorWidth:   1,
+      height:        48,
+      normalize:     true,
+      barWidth:      2,
+      barGap:        1,
+      interact:      true,
+    });
+    ws.load(`/files/${fid}/audio`);
+    ws.on('timeupdate', t => {
+      const dur = ws.getDuration() || 0;
+      const el  = document.querySelector(`[data-wftime="${fid}"]`);
+      if (el) el.textContent = fmtTime(t) + (dur ? ' / ' + fmtTime(dur) : '');
+    });
+    ws.on('play', () => {
+      // Stop all other players
+      WS.forEach((other, id) => { if (id !== fid) other.pause(); });
+      syncPlayBtns();
+    });
+    ws.on('pause',  syncPlayBtns);
+    ws.on('finish', syncPlayBtns);
+    WS.set(fid, ws);
+  });
+}
+
+function toggleWave(fid) {
+  const ws = WS.get(fid);
+  if (ws) ws.playPause();
+}
+
+function stopAllWaveforms() {
+  WS.forEach(ws => ws.pause());
+  syncPlayBtns();
+}
+
+function syncPlayBtns() {
+  document.querySelectorAll('[data-wfbtn]').forEach(btn => {
+    const ws = WS.get(btn.dataset.wfbtn);
+    btn.textContent = (ws && ws.isPlaying()) ? '■' : '▶';
+  });
+}
+
+function fmtTime(s) {
+  const m  = Math.floor(s / 60);
+  const ss = String(Math.floor(s % 60)).padStart(2, '0');
+  return `${m}:${ss}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIDI piano-roll grid
+// ─────────────────────────────────────────────────────────────────────────────
+
+function initMidiGrids() {
+  document.querySelectorAll('canvas.midi-canvas[data-midi]').forEach(canvas => {
+    drawMidiGrid(canvas, canvas.dataset.midi);
+  });
+}
+
+function drawMidiGrid(canvas, notesText) {
+  const notes = [];
+  (notesText || '').split('\n').forEach(line => {
+    const p = line.trim().split(/\s+/);
+    if (p[0] === 'NOTE' && p.length >= 4) {
+      notes.push({ pitch: p[1], start: parseFloat(p[2]), dur: parseFloat(p[3]) });
+    }
+  });
+  if (!notes.length) return;
+
+  const NOTE_SEMI = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
+  function toMidi(name) {
+    const m = name.match(/^([A-G]b?)(\d)$/);
+    if (!m) return 60;
+    const [, n, oct] = m;
+    const semi = n.length === 2 ? NOTE_SEMI[n[0]] + (n[1] === '#' ? 1 : -1) : NOTE_SEMI[n[0]];
+    return semi + (parseInt(oct) + 1) * 12;
+  }
+
+  const midis   = notes.map(n => toMidi(n.pitch));
+  const minM    = Math.min(...midis) - 1;
+  const maxM    = Math.max(...midis) + 1;
+  const maxT    = Math.max(...notes.map(n => n.start + n.dur)) || 1;
+  const pitchRng = maxM - minM + 1;
+
+  const W = canvas.offsetWidth  || canvas.parentElement.offsetWidth || 300;
+  const H = 80;
+  canvas.width  = W;
+  canvas.height = H;
+
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#f8f8f8';
+  ctx.fillRect(0, 0, W, H);
+
+  // horizontal grid lines per semitone
+  ctx.strokeStyle = '#e4e4e4';
+  ctx.lineWidth   = 0.5;
+  for (let p = 0; p <= pitchRng; p++) {
+    const y = (p / pitchRng) * H;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // note rectangles
+  ctx.fillStyle = '#0d0d0d';
+  const rowH = H / pitchRng;
+  notes.forEach((note, idx) => {
+    const x = (note.start / maxT) * W;
+    const w = Math.max(2, (note.dur / maxT) * W - 1);
+    const y = ((maxM - midis[idx]) / pitchRng) * H;
+    ctx.fillRect(x, y + 1, w, Math.max(2, rowH - 2));
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Focus / nav
+// ─────────────────────────────────────────────────────────────────────────────
+
+function focusEntry(i, scrollIntoView) {
+  const old = document.querySelector('.entry.focused');
+  if (old) old.classList.remove('focused');
+  stopAllWaveforms();
+  S.focusIdx = i;
+  const el = document.querySelector(`.entry[data-idx="${i}"]`);
+  if (!el) return;
+  el.classList.add('focused');
+  if (scrollIntoView) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+
+  // Don't steal focus if the user is actively typing somewhere (search, chat,
+  // inline editor) — otherwise every filter re-render kicks them out.
+  const a = document.activeElement;
+  const typing = a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable);
+  if (!typing) el.focus({ preventScroll: true });
+}
+
+function clickEntry(i) { focusEntry(i, false); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tag filter
+// ─────────────────────────────────────────────────────────────────────────────
+
+function filterByTag(tag) {
+  S.activeTag = S.activeTag === tag ? '' : tag;
+  applyFilters();
+  loadProjects(); // refresh active state in sidebar
+}
+
+function clearFilter() {
+  S.activeTag = '';
+  applyFilters();
+  loadProjects();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Search
+// ─────────────────────────────────────────────────────────────────────────────
+
+function clearSearch() {
+  S.searchQ = '';
+  document.getElementById('search-input').value = '';
+  applyFilters();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inline body save
+// ─────────────────────────────────────────────────────────────────────────────
+
+function scheduleBodySave(el) {
+  const fid = el.dataset.fileId;
+  if (!fid) return;
+  clearTimeout(S.saveTimers[fid]);
+  S.saveTimers[fid] = setTimeout(() => {
+    const val   = el.innerText.trim();
+    const field = el.dataset.field;
+    const payload = field === 'text'
+      ? { transcript: val }
+      : { transcript: val };
+    api(`/files/${fid}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+    const idx = S.all.findIndex(e => e.file_id === fid);
+    if (idx >= 0) {
+      if (field === 'text') S.all[idx].text = val;
+      else S.all[idx].transcript = val;
+    }
+  }, 900);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inline tag save
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function saveTagsFromRow(btn, fileId) {
+  const input = btn.previousElementSibling;
+  const tags  = input.value.split(',').map(t => t.trim()).filter(Boolean);
+  try {
+    await api(`/files/${fileId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags }),
+    });
+    const idx = S.all.findIndex(e => e.file_id === fileId);
+    if (idx >= 0) S.all[idx].tags = tags;
+    const card   = btn.closest('.entry');
+    const meta   = card.querySelector('.entry-meta');
+    // rebuild tag pills (keep slug)
+    const slug   = meta.querySelector('.entry-slug');
+    meta.innerHTML = '';
+    if (slug) meta.appendChild(slug);
+    tags.forEach(t => {
+      const b = document.createElement('button');
+      b.className = 'tag';
+      b.style.cssText = tagStyle(t);
+      b.textContent = t;
+      b.onclick = ev => { ev.stopPropagation(); filterByTag(t); };
+      meta.appendChild(b);
+    });
+    input.value = tags.join(', ');
+    loadProjects();
+  } catch (_) {}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete entry  (soft delete on the server)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function revealEntry(fileId) {
+  if (!fileId) return;
+  try {
+    await api(`/files/${fileId}/reveal`, { method: 'POST' });
+  } catch (e) {
+    alert(`couldn't reveal: ${e.message}`);
+  }
+}
+
+async function deleteEntry(fileId) {
+  if (!fileId) return;
+  if (!confirm('delete this entry?\n\n(soft delete — the raw file stays on disk and can be restored.)')) return;
+  try {
+    await api(`/files/${fileId}`, { method: 'DELETE' });
+    S.all = S.all.filter(e => e.file_id !== fileId);
+    applyFilters();
+    loadProjects();
+  } catch (e) {
+    alert(`delete failed: ${e.message}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Drag for DAW
+// ─────────────────────────────────────────────────────────────────────────────
+
+const AUDIO_MIME = {
+  ogg:  'audio/ogg',
+  opus: 'audio/ogg',
+  oga:  'audio/ogg',
+  mp3:  'audio/mpeg',
+  wav:  'audio/wav',
+  m4a:  'audio/mp4',
+  aac:  'audio/aac',
+  flac: 'audio/flac',
+};
+
+function _setDragData(e, url, filename, mime) {
+  // Chrome / Edge / Electron DAW installers understand DownloadURL and will
+  // materialize a real file on drop. Firefox/Safari fall back to URL drag.
+  try {
+    e.dataTransfer.setData('DownloadURL', `${mime}:${filename}:${url}`);
+  } catch (_) {}
+  e.dataTransfer.setData('text/uri-list', url);
+  e.dataTransfer.setData('text/plain',    url);
+  e.dataTransfer.effectAllowed = 'copy';
+}
+
+// Sanitize a slug into a filesystem-safe piece (paranoia; slugs are already
+// kebab-case in practice).
+function _safeFilename(s) {
+  return String(s || '').replace(/[^A-Za-z0-9._-]/g, '-') || 'file';
+}
+
+function onAudioDragStart(e, fileId, ext, slug) {
+  const e_  = (ext || 'ogg').toLowerCase();
+  const mime     = AUDIO_MIME[e_] || 'application/octet-stream';
+  const filename = `${_safeFilename(slug || fileId)}.${e_}`;
+  // URL path ends in the real filename — so browsers that ignore the
+  // Chrome DownloadURL payload still write the drop with the right name.
+  const url      = `${location.origin}/files/${fileId}/audio/${encodeURIComponent(filename)}`;
+  _setDragData(e, url, filename, mime);
+}
+
+function onMidiDragStart(e, fileId, slug) {
+  const filename = `${_safeFilename(slug || fileId)}.mid`;
+  const url      = `${location.origin}/files/${fileId}/midi/${encodeURIComponent(filename)}`;
+  _setDragData(e, url, filename, 'audio/midi');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyboard
+// ─────────────────────────────────────────────────────────────────────────────
+
+document.addEventListener('keydown', e => {
+  const active  = document.activeElement;
+  const editing = active.tagName === 'INPUT' || active.tagName === 'TEXTAREA'
+               || active.isContentEditable;
+
+  if (e.key === '/' && !editing) {
+    e.preventDefault();
+    document.getElementById('search-input').focus();
+    return;
+  }
+  if (e.key === 'Escape') {
+    clearFilter(); clearSearch();
+    document.getElementById('search-input').blur();
+    return;
+  }
+  if (!editing) {
+    if (e.key === 'ArrowDown' || e.key === 'j') {
+      e.preventDefault();
+      const next = Math.min(S.focusIdx + 1, S.shown.length - 1);
+      if (next !== S.focusIdx) focusEntry(next, true);
+    } else if (e.key === 'ArrowUp' || e.key === 'k') {
+      e.preventDefault();
+      const prev = Math.max(S.focusIdx - 1, 0);
+      if (prev !== S.focusIdx) focusEntry(prev, true);
+    } else if (e.key === ' ') {
+      e.preventDefault();
+      const el  = document.querySelector(`.entry[data-idx="${S.focusIdx}"]`);
+      const fid = el && el.dataset.fileId;
+      if (fid) toggleWave(fid);
+    }
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat
+// ─────────────────────────────────────────────────────────────────────────────
+
+function linkify(escapedText) {
+  // Match http(s) URLs. Trim trailing punctuation that's usually sentence-final.
+  return escapedText.replace(
+    /(https?:\/\/[^\s<]+[^\s<.,;:!?)\]])/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+  );
+}
+
+function audioPlayerHTML(fid) {
+  const f = esc(fid);
+  return `<div class="chat-wf">
+    <div class="wf-wave" data-waveform="${f}"></div>
+    <div class="wf-controls">
+      <button class="wf-btn" data-wfbtn="${f}" onclick="toggleWave('${f}')">▶</button>
+      <span class="wf-time-display" data-wftime="${f}">0:00</span>
+    </div>
+  </div>`;
+}
+
+function renderChatBody(text) {
+  // Split on audio markers first, then escape/linkify each text chunk.
+  const re = /\[\[audio:([a-f0-9]{8})\]\]/g;
+  let out  = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    out += linkify(esc(text.slice(last, m.index)));
+    out += audioPlayerHTML(m[1]);
+    last = m.index + m[0].length;
+  }
+  out += linkify(esc(text.slice(last)));
+  return out;
+}
+
+function appendMsg(sender, text) {
+  const log  = document.getElementById('chat-log');
+  const d    = document.createElement('div');
+  d.className = `chat-msg ${sender}`;
+  d.innerHTML = `<div class="sender">${sender}</div><div class="body">${renderChatBody(text)}</div>`;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+  // Instantiate WaveSurfer for any audio markers we just inserted
+  initWaveforms();
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chat-input');
+  const msg   = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  appendMsg('you', msg);
+  try {
+    const res = await api('/ingest/text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, conversation_id: S.conversationId }),
+    });
+    appendMsg('herbie', res.message);
+    await loadFeed();
+  } catch (e) {
+    appendMsg('herbie', `error: ${e.message}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audio upload
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function uploadAudio(file) {
+  const status = document.getElementById('upload-status');
+  status.textContent = 'processing…';
+  const form = new FormData();
+  form.append('file', file);
+  form.append('conversation_id', S.conversationId);
+  try {
+    const res = await fetch('/ingest/audio', { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    status.textContent = '';
+    appendMsg('herbie', data.message);
+    await loadFeed();
+  } catch (e) {
+    status.textContent = '';
+    appendMsg('herbie', `upload error: ${e.message}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Escape HTML
+// ─────────────────────────────────────────────────────────────────────────────
+
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wire events
+// ─────────────────────────────────────────────────────────────────────────────
+
+document.getElementById('send-btn').addEventListener('click', sendMessage);
+
+document.getElementById('chat-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+document.getElementById('upload-btn').addEventListener('click', () => {
+  document.getElementById('file-input').click();
+});
+
+document.getElementById('file-input').addEventListener('change', e => {
+  if (e.target.files[0]) uploadAudio(e.target.files[0]);
+  e.target.value = '';
+});
+
+document.getElementById('search-input').addEventListener('input', e => {
+  S.searchQ = e.target.value.trim();
+  applyFilters();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chat column resize
+// ─────────────────────────────────────────────────────────────────────────────
+
+(function initChatResize() {
+  const handle = document.getElementById('chat-resize');
+  const root   = document.documentElement;
+  const MIN = 240, MAX_FRAC = 0.6;
+
+  const setWidth = (px) => {
+    const max = Math.max(MIN + 40, window.innerWidth * MAX_FRAC);
+    const w   = Math.max(MIN, Math.min(max, px));
+    root.style.setProperty('--chat', w + 'px');
+    return w;
+  };
+
+  const saved = parseInt(localStorage.getItem('herbie.chatWidth') || '', 10);
+  if (!isNaN(saved)) setWidth(saved);
+
+  let dragging = false;
+  handle.addEventListener('mousedown', e => {
+    dragging = true;
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing');
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    // width = distance from cursor to right edge of window
+    const w = setWidth(window.innerWidth - e.clientX);
+    localStorage.setItem('herbie.chatWidth', String(w));
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.classList.remove('resizing');
+  });
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────────────────────────
+
+loadFeed();
+</script>
+</body>
+</html>

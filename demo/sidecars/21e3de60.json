@@ -1,0 +1,14 @@
+{
+  "id": "21e3de60",
+  "type": "lyric",
+  "ext": "txt",
+  "slug": "hospital_lyrics",
+  "tags": [
+    "hospital"
+  ],
+  "parent_id": null,
+  "job_id": null,
+  "transcript": "",
+  "created_at": "2026-04-17T08:42:31.825973",
+  "_migrated_from": "hospital/hospital_lyrics_v3.txt"
+}
