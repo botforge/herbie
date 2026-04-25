@@ -21,7 +21,6 @@ load_dotenv()
 
 from services.archive import (
     ensure_archive_root,
-    execute_archive_action,
     file_audio,
     file_lyrics,
     get_next_version,
@@ -34,7 +33,6 @@ from services.llm import (
     detect_read_query,
     extract_lyric_project,
     format_read_response,
-    parse_archive_action,
     respond_to_audio,
     respond_to_text,
 )
@@ -127,12 +125,9 @@ def run_chat():
         active_files = get_project_files(active_proj) if active_proj else None
         archive_ctx = build_archive_context(all_projects, active_proj or "", active_files)
         raw_reply = respond_to_text(user_input, history, archive_context=archive_ctx)
-        reply, action = parse_archive_action(raw_reply)
-        if action:
-            execute_archive_action(action)
-        herbie_say(reply)
+        herbie_say(raw_reply)
         history.append({"role": "user", "content": user_input})
-        history.append({"role": "assistant", "content": reply})
+        history.append({"role": "assistant", "content": raw_reply})
         history = history[-20:]
 
 

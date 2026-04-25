@@ -39,11 +39,9 @@ from services.archive import (
     file_lyrics,
     get_next_version,
 )
-from services.archive import execute_archive_action
 from services.llm import (
     detect_lyric_intent,
     extract_lyric_project,
-    parse_archive_action,
     respond_to_audio,
     respond_to_text,
 )
@@ -136,7 +134,7 @@ async def _send(update: Update, text: str):
     attachments (sendDocument — preserves filename and lets the user save
     the raw audio). Text chunks between markers go as reply_text.
     """
-    from services.archive import RAW_DIR, _read_sidecar
+    from services.archive import RAW_DIR, current_entry
     from telegram import InputFile
 
     markers = list(AUDIO_MARKER_RE.finditer(text))
@@ -158,7 +156,7 @@ async def _send(update: Update, text: str):
                 await update.message.reply_text(chunk)
 
         fid = m.group(1).lower()
-        sc  = _read_sidecar(fid)
+        sc  = current_entry(fid)
         log.info(f"[telegram/_send] marker {fid} sidecar_found={bool(sc)}")
 
         if not sc:
@@ -248,9 +246,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info(f"[telegram] JOB MARKER: {job_args}")
         reply = handle_job(job_args)
     else:
-        reply, action = parse_archive_action(raw_reply)
-        if action:
-            execute_archive_action(action)
+        reply = raw_reply
 
     await _send(update, reply)
     _push(chat_id, "user", llm_msg)

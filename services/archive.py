@@ -1,23 +1,32 @@
 """
-Archive service v2 — flat, tag-based, event-sourced.
+Archive service — flat, tag-based, event-sourced, append-only.
 
-Layout under ARCHIVE_ROOT:
-  raw/           immutable originals, named {id}.{ext}
-  sidecars/      {id}.json per file
-  events.jsonl   append-only log — source of truth for the feed
-  jobs/          {job_id}.json per pending/done job
-  summaries/     {tag}_summary.md built on demand
+How to read this module:
+
+  1. Layout on disk under ARCHIVE_ROOT:
+     1A. raw/           immutable originals, named {file_id}.{ext}
+     1B. events.jsonl   append-only log — the SINGLE source of truth
+     1C. jobs/          {job_id}.json per pending / done job
+     1D. summaries/     {tag}_summary.md built on demand
+  2. Every state change is a new line appended to events.jsonl. No
+     event is ever rewritten in place. Soft delete, retag, rename,
+     transcript fix — all of them are new "correction" or "delete"
+     events that fold over the original.
+  3. Reads (get_feed, get_all_tags, current_entry) replay the log to
+     compute the live view. The fold is the only place "current
+     state" exists; there is no shadow store.
 
 Core API:
   ingest_audio(src_path, slug, tags, ext, transcript, parent_id) → event
   ingest_text(slug, tags, text, parent_id)                       → event
+  apply_correction(file_id, slug?, tags?, transcript?)           → event | None
+  current_entry(file_id)                                         → dict
   get_feed(tag, limit, offset)                                   → list[dict]
   get_all_tags()                                                 → list[dict]
-  update_file_meta(file_id, transcript, tags)                    → bool
+  delete_file(file_id)                                           → bool
   queue_job(job_type, input_file_id, params)                     → dict
   complete_job(job_id, output_file_id, output_text)              → None
   get_jobs(status)                                               → list[dict]
-  execute_archive_action(action)                                 → str
   ensure_archive_root()                                          → None
   migrate_v1()                                                   → int
 
@@ -40,7 +49,6 @@ load_dotenv()
 
 ARCHIVE_ROOT  = Path(os.getenv("ARCHIVE_PATH", "./archive"))
 RAW_DIR       = ARCHIVE_ROOT / "raw"
-SIDECARS_DIR  = ARCHIVE_ROOT / "sidecars"
 EVENTS_FILE   = ARCHIVE_ROOT / "events.jsonl"
 JOBS_DIR      = ARCHIVE_ROOT / "jobs"
 SUMMARIES_DIR = ARCHIVE_ROOT / "summaries"
@@ -56,10 +64,73 @@ _META_TAGS = {
 
 
 def ensure_archive_root():
-    for d in (RAW_DIR, SIDECARS_DIR, JOBS_DIR, SUMMARIES_DIR):
+    """
+    1. Create the on-disk skeleton (raw/, jobs/, summaries/) and an
+       empty events.jsonl if it does not exist.
+    2. If a legacy sidecars/ directory survives from a prior version
+       of the codebase, replay any sidecars that have no matching
+       audio/text event into events.jsonl. This is idempotent — once
+       every sidecar has an event, the bootstrap returns 0 and this
+       call becomes a no-op for fresh archives.
+    """
+    for d in (RAW_DIR, JOBS_DIR, SUMMARIES_DIR):
         d.mkdir(parents=True, exist_ok=True)
     if not EVENTS_FILE.exists():
         EVENTS_FILE.touch()
+    _bootstrap_events_from_orphan_sidecars()
+
+
+def _bootstrap_events_from_orphan_sidecars() -> int:
+    """
+    1. Locate the legacy archive/sidecars/ directory. If it does not
+       exist, this archive is already on the events-only model — return.
+    2. Build the set of file_ids that already have an audio/text event.
+    3. For each sidecar with no matching event, reconstruct an event
+       from the sidecar contents and append it. The fields mapped:
+         3A. file_id ← sidecar.id (or filename stem as fallback)
+         3B. type, slug, tags, transcript, ext, parent_id, job_id,
+             created_at copied verbatim
+         3C. midi_notes / text copied if present
+    4. Return the count of bootstrapped events so callers (or the
+       startup log) can see whether work was done.
+    """
+    legacy_dir = ARCHIVE_ROOT / "sidecars"
+    if not legacy_dir.exists():
+        return 0
+    have_events: set[str] = {
+        ev.get("file_id") for ev in _read_events()
+        if ev.get("type") in ("audio", "text")
+    }
+    bootstrapped = 0
+    for sc_path in sorted(legacy_dir.iterdir()):
+        if sc_path.suffix != ".json":
+            continue
+        try:
+            sc = json.loads(sc_path.read_text())
+        except Exception:
+            continue
+        fid = sc.get("id") or sc_path.stem
+        if fid in have_events:
+            continue
+        ev = {
+            "event_id":   _new_id(),
+            "type":       sc.get("type", "audio"),
+            "file_id":    fid,
+            "slug":       sc.get("slug"),
+            "tags":       sc.get("tags", []),
+            "transcript": sc.get("transcript", ""),
+            "ext":        sc.get("ext", "ogg"),
+            "parent_id":  sc.get("parent_id"),
+            "job_id":     sc.get("job_id"),
+            "created_at": sc.get("created_at", datetime.now().isoformat()),
+        }
+        if "midi_notes" in sc:
+            ev["midi_notes"] = sc["midi_notes"]
+        if "text" in sc:
+            ev["text"] = sc["text"]
+        _append_event(ev)
+        bootstrapped += 1
+    return bootstrapped
 
 
 # ── IDs ─────────────────────────────────────────────────────────────────────
@@ -90,42 +161,6 @@ def _read_events() -> list[dict]:
     return events
 
 
-def _patch_events(file_id: str, updates: dict) -> None:
-    """Rewrite events.jsonl, patching all events with this file_id."""
-    if not EVENTS_FILE.exists():
-        return
-    lines = []
-    with EVENTS_FILE.open() as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                ev = json.loads(raw)
-                if ev.get("file_id") == file_id:
-                    ev.update(updates)
-                lines.append(json.dumps(ev))
-            except Exception:
-                lines.append(raw)
-    EVENTS_FILE.write_text("\n".join(lines) + "\n")
-
-
-# ── Sidecar helpers ──────────────────────────────────────────────────────────
-
-def _read_sidecar(file_id: str) -> dict:
-    p = SIDECARS_DIR / f"{file_id}.json"
-    if p.exists():
-        try:
-            return json.loads(p.read_text())
-        except Exception:
-            pass
-    return {}
-
-
-def _write_sidecar(file_id: str, data: dict) -> None:
-    (SIDECARS_DIR / f"{file_id}.json").write_text(json.dumps(data, indent=2))
-
-
 # ── Audio ingest ─────────────────────────────────────────────────────────────
 
 def ingest_audio(
@@ -138,7 +173,7 @@ def ingest_audio(
 ) -> dict:
     ensure_archive_root()
     if parent_id:
-        inherited = _read_sidecar(parent_id).get("tags", [])
+        inherited = current_entry(parent_id).get("tags", [])
         tags = inherited + [t for t in tags if t not in inherited]
 
     file_id = _new_id()
@@ -146,11 +181,6 @@ def ingest_audio(
     shutil.copy2(str(src_path), str(RAW_DIR / f"{file_id}.{ext}"))
 
     now = datetime.now().isoformat()
-    sc = {"id": file_id, "type": "audio", "ext": ext, "slug": slug,
-          "tags": tags, "parent_id": parent_id, "job_id": None,
-          "transcript": transcript, "created_at": now}
-    _write_sidecar(file_id, sc)
-
     event = {"event_id": _new_id(), "type": "audio", "file_id": file_id,
              "slug": slug, "tags": tags, "transcript": transcript,
              "ext": ext, "parent_id": parent_id, "job_id": None,
@@ -175,7 +205,7 @@ def ingest_text(
     """
     ensure_archive_root()
     if parent_id:
-        inherited = _read_sidecar(parent_id).get("tags", [])
+        inherited = current_entry(parent_id).get("tags", [])
         tags = inherited + [t for t in tags if t not in inherited]
 
     file_id = _new_id()
@@ -183,13 +213,6 @@ def ingest_text(
     (RAW_DIR / f"{file_id}.txt").write_text(midi_notes or text)
 
     now = datetime.now().isoformat()
-    sc = {"id": file_id, "type": "text", "ext": "txt", "slug": slug,
-          "tags": tags, "parent_id": parent_id, "job_id": None,
-          "transcript": "", "text": text, "created_at": now}
-    if midi_notes is not None:
-        sc["midi_notes"] = midi_notes
-    _write_sidecar(file_id, sc)
-
     event = {"event_id": _new_id(), "type": "text", "file_id": file_id,
              "slug": slug, "tags": tags, "text": text, "ext": "txt",
              "parent_id": parent_id, "job_id": None, "created_at": now}
@@ -231,6 +254,40 @@ def _fold_corrections(all_events: list[dict]) -> dict[str, dict]:
             if field in ev:
                 cur[field] = ev[field]
     return overrides
+
+
+def current_entry(file_id: str) -> dict:
+    """
+    Return the folded current state of an entry by file_id.
+
+    1. Read every event in the log.
+    2. If the file_id has a delete event, return {} — the entry is
+       gone from the user's perspective even if its bytes remain on
+       disk.
+    3. Find the originating audio/text event for the file_id. If
+       none, return {} — the file_id was never ingested.
+    4. Layer all corrections on top of the original event in
+       event-log order, so the latest user-stated truth wins per
+       dimension (slug / tags / transcript).
+    5. Alias `id` to `file_id` so legacy call sites that read
+       `entry["id"]` keep working without a rename pass.
+    """
+    all_events = _read_events()
+    if file_id in _deleted_ids(all_events):
+        return {}
+    origin = next(
+        (e for e in all_events
+         if e.get("file_id") == file_id
+         and e.get("type") in ("audio", "text")),
+        None,
+    )
+    if origin is None:
+        return {}
+    overrides = _fold_corrections(all_events).get(file_id, {})
+    folded = dict(origin)
+    folded.update(overrides)
+    folded["id"] = folded.get("file_id")
+    return folded
 
 
 def _apply_overrides(event: dict, overrides: dict[str, dict]) -> dict:
@@ -309,12 +366,18 @@ def get_all_tags() -> list[dict]:
 
 def delete_file(file_id: str) -> bool:
     """
-    Soft-delete: append a 'delete' event. The raw file and sidecar stay on
-    disk, but the entry is filtered out of get_feed and get_all_tags.
-    Recover by removing the delete event from events.jsonl.
+    Soft-delete: append a 'delete' event. The raw file stays on disk
+    so the entry can be recovered by removing the delete event from
+    events.jsonl. The entry is filtered out of get_feed and
+    get_all_tags going forward.
+
+    1. Confirm the file_id refers to a live entry (not missing, not
+       already deleted) by asking current_entry.
+    2. Append the delete event. Idempotent if already deleted —
+       current_entry returns {} for already-deleted entries, so the
+       call short-circuits.
     """
-    sc = _read_sidecar(file_id)
-    if not sc:
+    if not current_entry(file_id):
         return False
     now = datetime.now().isoformat()
     _append_event({
@@ -389,29 +452,6 @@ def apply_correction(
     return correction
 
 
-# ── Meta update ──────────────────────────────────────────────────────────────
-
-def update_file_meta(
-    file_id: str,
-    transcript: str | None = None,
-    tags: list[str] | None = None,
-) -> bool:
-    sc = _read_sidecar(file_id)
-    if not sc:
-        return False
-    updates: dict = {}
-    if transcript is not None:
-        sc["transcript"] = transcript
-        updates["transcript"] = transcript
-    if tags is not None:
-        sc["tags"] = tags
-        updates["tags"] = tags
-    _write_sidecar(file_id, sc)
-    if updates:
-        _patch_events(file_id, updates)
-    return True
-
-
 # ── Jobs ─────────────────────────────────────────────────────────────────────
 
 def queue_job(job_type: str, input_file_id: str, params: dict | None = None) -> dict:
@@ -422,7 +462,7 @@ def queue_job(job_type: str, input_file_id: str, params: dict | None = None) -> 
            "params": params or {}, "status": "queued",
            "output_file_id": None, "created_at": now, "completed_at": None}
     (JOBS_DIR / f"{job_id}.json").write_text(json.dumps(job, indent=2))
-    input_tags = _read_sidecar(input_file_id).get("tags", [])
+    input_tags = current_entry(input_file_id).get("tags", [])
     _append_event({"event_id": _new_id(), "type": "job_queued",
                    "job_id": job_id, "job_type": job_type,
                    "input_file_id": input_file_id, "tags": input_tags,
@@ -440,7 +480,7 @@ def complete_job(job_id: str, output_file_id: str | None = None,
     job.update({"status": "done", "output_file_id": output_file_id,
                 "completed_at": now})
     p.write_text(json.dumps(job, indent=2))
-    input_tags = _read_sidecar(job.get("input_file_id", "")).get("tags", [])
+    input_tags = current_entry(job.get("input_file_id", "")).get("tags", [])
     _append_event({"event_id": _new_id(), "type": "job_done",
                    "job_id": job_id, "job_type": job.get("type"),
                    "output_file_id": output_file_id, "output_text": output_text,
@@ -459,84 +499,6 @@ def get_jobs(status: str | None = None) -> list[dict]:
         except Exception:
             pass
     return sorted(jobs, key=lambda x: x.get("created_at", ""), reverse=True)
-
-
-# ── Archive actions (LLM-driven mutations) ───────────────────────────────────
-
-def execute_archive_action(action: dict) -> str:
-    kind = action.get("action")
-    try:
-        if kind == "rename":  return _action_rename(action)
-        if kind == "move":    return _action_move(action)
-        if kind == "retag":   return _action_retag(action)
-        if kind == "tag_append": return _action_tag_append(action)
-        return f"unknown action: {kind}"
-    except Exception as e:
-        return f"action failed: {e}"
-
-
-def _resolve_file_id(action: dict) -> str | None:
-    if action.get("file_id"):
-        return action["file_id"]
-    slug = action.get("old_slug") or action.get("slug")
-    if slug:
-        for ev in reversed(_read_events()):
-            if ev.get("slug") == slug and ev.get("type") in ("audio", "text"):
-                return ev.get("file_id")
-    return None
-
-
-def _action_rename(action: dict) -> str:
-    fid = _resolve_file_id(action)
-    new_slug = action.get("new_slug")
-    if not fid or not new_slug:
-        return "rename: could not identify file or missing new_slug"
-    sc = _read_sidecar(fid)
-    if not sc:
-        return "rename: file not found"
-    sc["slug"] = new_slug
-    _write_sidecar(fid, sc)
-    _patch_events(fid, {"slug": new_slug})
-    return f"renamed → {new_slug}"
-
-
-def _action_move(action: dict) -> str:
-    fid = _resolve_file_id(action)
-    old_proj = action.get("project", "")
-    new_proj = action.get("new_project", "")
-    if not fid or not new_proj:
-        return "move: missing file or new_project"
-    sc = _read_sidecar(fid)
-    if not sc:
-        return "move: file not found"
-    tags = [t for t in sc.get("tags", []) if t != old_proj]
-    if new_proj not in tags:
-        tags.insert(0, new_proj)
-    sc["tags"] = tags
-    _write_sidecar(fid, sc)
-    _patch_events(fid, {"tags": tags})
-    return f"moved → {new_proj}"
-
-
-def _action_retag(action: dict) -> str:
-    fid = _resolve_file_id(action)
-    if not fid:
-        return "retag: could not identify file"
-    update_file_meta(fid, tags=action.get("tags", []))
-    return "tags updated"
-
-
-def _action_tag_append(action: dict) -> str:
-    fid = _resolve_file_id(action)
-    if not fid:
-        return "tag_append: could not identify file"
-    sc = _read_sidecar(fid)
-    if not sc:
-        return "tag_append: file not found"
-    existing = sc.get("tags", [])
-    new_t = [t for t in action.get("tags", []) if t not in existing]
-    update_file_meta(fid, tags=existing + new_t)
-    return "tags appended"
 
 
 # ── Backward-compat wrappers ─────────────────────────────────────────────────
@@ -657,11 +619,6 @@ def migrate_v1() -> int:
 
             file_id = _new_id()
             shutil.copy2(str(f), str(RAW_DIR / f"{file_id}.{ext}"))
-            sc = {"id": file_id, "type": ftype, "ext": ext, "slug": slug,
-                  "tags": tags, "parent_id": None, "job_id": None,
-                  "transcript": transcript, "created_at": created_at,
-                  "_migrated_from": str(f.relative_to(ARCHIVE_ROOT))}
-            _write_sidecar(file_id, sc)
 
             ev: dict = {"event_id": _new_id(), "type": ftype, "file_id": file_id,
                         "slug": slug, "tags": tags, "transcript": transcript,

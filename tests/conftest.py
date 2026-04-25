@@ -4,9 +4,9 @@ Shared pytest fixtures.
 How to read this file:
 
   1. The archive service (services/archive.py) reads ARCHIVE_PATH from
-     the environment at import time and stores it as six module-level
-     path constants (ARCHIVE_ROOT, RAW_DIR, SIDECARS_DIR, EVENTS_FILE,
-     JOBS_DIR, SUMMARIES_DIR).
+     the environment at import time and stores it as five module-level
+     path constants (ARCHIVE_ROOT, RAW_DIR, EVENTS_FILE, JOBS_DIR,
+     SUMMARIES_DIR).
   2. Every filesystem write inside services/archive.py resolves through
      those module-level constants, so redirecting them at runtime
      redirects every write.
@@ -40,10 +40,9 @@ from services import archive
 #   1A. Before each test runs, take a snapshot of:
 #         - the SHA-256 of the real archive/events.jsonl
 #         - the set of filenames in archive/raw/
-#         - the set of filenames in archive/sidecars/
 #   1B. After the test yields, take the same snapshot again.
-#   1C. Assert all three are byte-identical. A single appended event,
-#       rewritten log, new raw file, or deleted sidecar trips the guard.
+#   1C. Assert both are byte-identical. A single appended event,
+#       rewritten log, or new raw file trips the guard.
 #
 # Hash + filename sets are used (not mtime) so reading the real archive
 # never false-positives — only genuine mutations fail the test.
@@ -53,18 +52,17 @@ _REAL_ARCHIVE = Path(__file__).resolve().parent.parent / "archive"
 
 def _snapshot_real_archive() -> dict:
     # 1. Build an empty snapshot shell.
-    snap: dict = {"events_hash": None, "raw": set(), "sidecars": set()}
+    snap: dict = {"events_hash": None, "raw": set()}
 
     # 2. Hash events.jsonl if it exists.
     ev = _REAL_ARCHIVE / "events.jsonl"
     if ev.exists():
         snap["events_hash"] = hashlib.sha256(ev.read_bytes()).hexdigest()
 
-    # 3. List filenames under raw/ and sidecars/ if they exist.
-    for sub in ("raw", "sidecars"):
-        d = _REAL_ARCHIVE / sub
-        if d.exists():
-            snap[sub] = {p.name for p in d.iterdir()}
+    # 3. List filenames under raw/ if it exists.
+    raw = _REAL_ARCHIVE / "raw"
+    if raw.exists():
+        snap["raw"] = {p.name for p in raw.iterdir()}
 
     return snap
 
@@ -81,10 +79,6 @@ def _guard_real_archive():
     assert after["raw"] == before["raw"], (
         f"archive/raw changed: added={after['raw'] - before['raw']}, "
         f"removed={before['raw'] - after['raw']}"
-    )
-    assert after["sidecars"] == before["sidecars"], (
-        f"archive/sidecars changed: added={after['sidecars'] - before['sidecars']}, "
-        f"removed={before['sidecars'] - after['sidecars']}"
     )
 
 
@@ -108,7 +102,6 @@ def temp_archive(tmp_path, monkeypatch):
     # 2. Redirect every path constant to somewhere inside that root.
     monkeypatch.setattr(archive, "ARCHIVE_ROOT",  root)
     monkeypatch.setattr(archive, "RAW_DIR",       root / "raw")
-    monkeypatch.setattr(archive, "SIDECARS_DIR",  root / "sidecars")
     monkeypatch.setattr(archive, "EVENTS_FILE",   root / "events.jsonl")
     monkeypatch.setattr(archive, "JOBS_DIR",      root / "jobs")
     monkeypatch.setattr(archive, "SUMMARIES_DIR", root / "summaries")

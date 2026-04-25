@@ -16,8 +16,8 @@ from pathlib import Path
 
 from services.archive import (
     RAW_DIR,
-    _read_sidecar,
     complete_job,
+    current_entry,
     ingest_audio,
     ingest_text,
 )
@@ -70,7 +70,7 @@ def handle_job(args: dict) -> str:
         fid = (args.get("file_id") or "").strip()
         if not fid:
             return "which file? give me a file_id from the archive."
-        sc = _read_sidecar(fid)
+        sc = current_entry(fid)
         print(f"[HERBIE/jobs] to_midi: sidecar for {fid}: {bool(sc)}")
         if not sc:
             return f"file {fid} not found."
@@ -97,7 +97,7 @@ def handle_job(args: dict) -> str:
         fid = (args.get("file_id") or "").strip()
         if not fid:
             return "which file? give me a file_id from the archive."
-        sc = _read_sidecar(fid)
+        sc = current_entry(fid)
         if not sc:
             return f"file {fid} not found."
         parent_slug = sc.get("slug", fid)
@@ -130,7 +130,7 @@ def handle_job(args: dict) -> str:
 def execute_job(job: dict) -> None:
     jtype = job.get("job_type") or job.get("type", "")
     fid   = job.get("input_file_id", "")
-    sc    = _read_sidecar(fid)
+    sc    = current_entry(fid)
     if not sc and jtype != "summarize":
         return
 

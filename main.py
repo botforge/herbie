@@ -23,18 +23,16 @@ from services.archive import (
     ensure_archive_root,
     ingest_audio, ingest_text,
     get_feed, get_all_tags,
-    update_file_meta,
+    apply_correction,
+    current_entry,
     delete_file,
     queue_job, complete_job, get_jobs,
-    execute_archive_action,
     search,
     migrate_v1,
-    _read_sidecar,
 )
 from services.llm import (
     detect_lyric_intent,
     extract_lyric_project,
-    parse_archive_action,
     respond_to_audio,
     respond_to_text,
 )
@@ -114,7 +112,7 @@ async def serve_audio(file_id: str, filename: str = ""):
     path = _find_audio_path(file_id)
     if not path:
         raise HTTPException(404, "audio file not found")
-    sc   = _read_sidecar(file_id) or {}
+    sc   = current_entry(file_id) or {}
     slug = sc.get("slug") or file_id
     ext  = path.suffix.lstrip(".")
     return FileResponse(str(path), filename=f"{slug}.{ext}")
@@ -134,7 +132,7 @@ async def serve_midi(file_id: str, filename: str = ""):
     """Render the sidecar's NOTE data to a real .mid file for DAW drag-in."""
     from fastapi.responses import Response
     from services.jobs import notes_text_to_midi_bytes
-    sc = _read_sidecar(file_id)
+    sc = current_entry(file_id)
     if not sc:
         raise HTTPException(404, "file not found")
 
@@ -168,8 +166,17 @@ class PatchFileRequest(BaseModel):
 
 @app.patch("/files/{file_id}")
 async def patch_file(file_id: str, req: PatchFileRequest):
-    ok = update_file_meta(file_id, transcript=req.transcript, tags=req.tags)
-    if not ok:
+    """
+    1. Inline edits from the web UI route through apply_correction so
+       the change becomes a new event in events.jsonl rather than an
+       in-place rewrite of the original ingest event.
+    2. Returns 404 if the file_id is missing or already deleted —
+       apply_correction returns None in that case.
+    """
+    result = apply_correction(
+        file_id, transcript=req.transcript, tags=req.tags,
+    )
+    if result is None:
         raise HTTPException(404, "file not found")
     return {"ok": True}
 
@@ -190,7 +197,7 @@ async def reveal_file(file_id: str):
     first reveal (they only exist as NOTE text otherwise).
     """
     import subprocess, platform
-    sc = _read_sidecar(file_id)
+    sc = current_entry(file_id)
     if not sc:
         raise HTTPException(404, "file not found")
 
@@ -383,14 +390,10 @@ async def ingest_text_endpoint(req: TextRequest):
 
     print(f"[HERBIE/text] no job marker, treating as chat")
 
-    reply, action = parse_archive_action(raw_reply)
-    if action:
-        execute_archive_action(action)
-
     history.append({"role": "user", "content": req.message})
-    history.append({"role": "assistant", "content": reply})
+    history.append({"role": "assistant", "content": raw_reply})
     _conversations[req.conversation_id] = history[-20:]
-    return {"message": reply, "type": "chat"}
+    return {"message": raw_reply, "type": "chat"}
 
 
 
@@ -407,7 +410,7 @@ class JobRequest(BaseModel):
 
 @app.post("/jobs")
 async def create_job(req: JobRequest):
-    sc = _read_sidecar(req.input_file_id)
+    sc = current_entry(req.input_file_id)
     if not sc:
         raise HTTPException(404, "input file not found")
     job = queue_job(req.job_type, req.input_file_id, req.params)

@@ -401,7 +401,7 @@ def _tool_file_text(args: dict) -> str:
 
 
 def _tool_read_entries(args: dict) -> str:
-    from services.archive import get_feed, _read_sidecar
+    from services.archive import get_feed
     limit = int(args.get("limit") or 30)
     tag   = (args.get("tag") or "").strip()
     print(f"[HERBIE/llm/read_entries] tag={tag!r} limit={limit}")
@@ -413,13 +413,7 @@ def _tool_read_entries(args: dict) -> str:
             continue
         text  = (e.get("text") or "").strip()
         trans = (e.get("transcript") or "").strip()
-
-        # Pull midi_notes from the event OR from the sidecar (legacy entries
-        # filed before midi_notes was an event field still have it in sidecar).
         midi  = (e.get("midi_notes") or "").strip()
-        if not midi and "midi" in (e.get("tags") or []):
-            sc = _read_sidecar(e.get("file_id", "")) or {}
-            midi = (sc.get("midi_notes") or "").strip()
 
         body = text or trans
         if not body and not midi:
@@ -688,36 +682,6 @@ def detect_summarize_intent(text: str, known_tags: list[str]) -> str | None:
             if candidate in tag_map:
                 return tag_map[candidate]
     return None
-
-
-# ---------------------------------------------------------------------------
-# Archive action parsing
-# ---------------------------------------------------------------------------
-
-_ACTION_DELIMITER = "<<<archive_action>>>"
-
-
-def parse_archive_action(response: str) -> tuple[str, dict | None]:
-    """
-    Split an LLM response into (text, action_dict | None).
-    The action block is stripped before showing the text to the user.
-    """
-    if _ACTION_DELIMITER not in response:
-        return response.strip(), None
-
-    parts = response.split(_ACTION_DELIMITER, 1)
-    text = parts[0].strip()
-    raw = parts[1].strip()
-
-    # Strip markdown fences if the LLM wrapped it
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-
-    try:
-        action = json.loads(raw)
-        return text, action
-    except Exception:
-        return text, None
 
 
 # ---------------------------------------------------------------------------
