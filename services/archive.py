@@ -206,12 +206,72 @@ def _deleted_ids(all_events: list[dict]) -> set[str]:
             if e.get("type") == "delete" and e.get("file_id")}
 
 
+def _fold_corrections(all_events: list[dict]) -> dict[str, dict]:
+    """
+    Replay correction events to compute the current state of each entry.
+
+    1. Walk events in the order they were written (oldest first — that
+       is the natural append order in events.jsonl).
+    2. For each correction event, look up the per-file_id state we are
+       building and overwrite only the dimensions the correction
+       carried (slug / tags / transcript).
+    3. Return a map { file_id: {slug?, tags?, transcript?} } that
+       callers can layer on top of the original audio/text event to
+       produce the folded view.
+    """
+    overrides: dict[str, dict] = {}
+    for ev in all_events:
+        if ev.get("type") != "correction":
+            continue
+        fid = ev.get("file_id")
+        if not fid:
+            continue
+        cur = overrides.setdefault(fid, {})
+        for field in ("slug", "tags", "transcript"):
+            if field in ev:
+                cur[field] = ev[field]
+    return overrides
+
+
+def _apply_overrides(event: dict, overrides: dict[str, dict]) -> dict:
+    """
+    Return a shallow copy of `event` with any per-file_id correction
+    overrides merged in. Used to fold corrections onto audio/text
+    events without mutating the original event dict.
+    """
+    fid = event.get("file_id")
+    patch = overrides.get(fid) if fid else None
+    if not patch:
+        return event
+    folded = dict(event)
+    folded.update(patch)
+    return folded
+
+
 def get_feed(tag: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
+    """
+    Return the user-facing feed.
+
+    1. Read every event from events.jsonl.
+    2. Compute the set of file_ids that have been soft-deleted, plus
+       the per-file_id correction overrides.
+    3. Keep only audio/text events (drop meta_update, delete, and
+       correction — corrections are folded into their parent's row,
+       not shown as separate rows in the feed).
+    4. Drop entries whose file_id has been soft-deleted.
+    5. Layer correction overrides on top so each row reflects the
+       latest user-stated truth (slug, tags, transcript).
+    6. Reverse to newest-first, optionally filter by tag against the
+       FOLDED tag set, and slice for pagination.
+    """
     all_events = _read_events()
     deleted    = _deleted_ids(all_events)
+    overrides  = _fold_corrections(all_events)
+
     events = [e for e in all_events
-              if e.get("type") not in ("meta_update", "delete")
+              if e.get("type") in ("audio", "text")
               and e.get("file_id") not in deleted]
+    events = [_apply_overrides(e, overrides) for e in events]
     events.reverse()
     if tag:
         events = [e for e in events if tag in e.get("tags", [])]
@@ -219,15 +279,27 @@ def get_feed(tag: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
 
 
 def get_all_tags() -> list[dict]:
+    """
+    Count the occurrences of every tag across the live, folded feed.
+
+    1. Read every event and compute deletions + correction overrides.
+    2. For each live audio/text entry, fold its tags through the
+       overrides (so a corrected tag set replaces the original).
+    3. Tally each tag once per entry.
+    4. Return sorted by descending count, the shape the web UI uses.
+    """
     all_events = _read_events()
     deleted    = _deleted_ids(all_events)
+    overrides  = _fold_corrections(all_events)
+
     counts: dict[str, int] = {}
     for ev in all_events:
-        if ev.get("type") in ("meta_update", "delete"):
+        if ev.get("type") not in ("audio", "text"):
             continue
         if ev.get("file_id") in deleted:
             continue
-        for t in ev.get("tags", []):
+        folded = _apply_overrides(ev, overrides)
+        for t in folded.get("tags", []):
             counts[t] = counts.get(t, 0) + 1
     return sorted([{"tag": t, "count": c} for t, c in counts.items()],
                   key=lambda x: x["count"], reverse=True)
@@ -252,6 +324,69 @@ def delete_file(file_id: str) -> bool:
         "created_at": now,
     })
     return True
+
+
+# ── Corrections (append-only metadata mutation) ──────────────────────────────
+
+def apply_correction(
+    file_id: str,
+    slug: str | None = None,
+    tags: list[str] | None = None,
+    transcript: str | None = None,
+) -> dict | None:
+    """
+    Record a metadata correction against an existing entry.
+
+    1. Find the original audio/text event for `file_id` in the log.
+       If it does not exist (or is already deleted), return None and
+       do nothing — there is no entry to correct.
+    2. Build a new event of type "correction" that names the same
+       file_id and carries only the fields that should change. Fields
+       passed as None are omitted, so callers can correct one
+       dimension (e.g. just tags) without restating the others.
+    3. Append the correction event to events.jsonl. The original event
+       is NOT touched. Sidecars are NOT touched. The log is the
+       single source of truth; everything else is derived from it.
+    4. Return the new correction event so callers can render it,
+       broadcast it, or assert against it.
+    """
+
+    # 1. Validate the file_id refers to an entry that actually exists
+    #    and has not been soft-deleted. We only accept corrections on
+    #    live audio/text entries — corrections-of-corrections are
+    #    intentionally not supported in this primitive.
+    all_events = _read_events()
+    deleted = _deleted_ids(all_events)
+    target = next(
+        (e for e in all_events
+         if e.get("file_id") == file_id
+         and e.get("type") in ("audio", "text")
+         and file_id not in deleted),
+        None,
+    )
+    if target is None:
+        return None
+
+    # 2. Build the correction payload. Only set fields the caller
+    #    actually supplied; missing fields = "no change to this
+    #    dimension."
+    now = datetime.now().isoformat()
+    correction = {
+        "event_id":   _new_id(),
+        "type":       "correction",
+        "file_id":    file_id,
+        "created_at": now,
+    }
+    if slug is not None:
+        correction["slug"] = slug
+    if tags is not None:
+        correction["tags"] = tags
+    if transcript is not None:
+        correction["transcript"] = transcript
+
+    # 3. Append. Nothing else is mutated.
+    _append_event(correction)
+    return correction
 
 
 # ── Meta update ──────────────────────────────────────────────────────────────

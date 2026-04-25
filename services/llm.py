@@ -46,17 +46,21 @@ def _model() -> str:
 # Audio ingestion response
 # ---------------------------------------------------------------------------
 
+# TODO: does _AUDIO_SYSTEM need to exist separately, or can these instructions
+# live inside soul.md? Duplicating rules across two prompts is how the filing
+# format drifted before — worth collapsing if soul.md can carry the JSON schema
+# rules directly for audio turns.
 _AUDIO_SYSTEM = """{soul}
 
 When responding to an audio submission you MUST reply with valid JSON only.
-No prose before or after the JSON block.
+No prose before or after the JSON block. Do not include a confirmation
+message — the server constructs the filing confirmation deterministically.
 
 Schema:
 {{
   "project": "<project-slug>",
   "slug": "<semantic-idea-slug>",
-  "tags": ["<tag>", ...],
-  "message": "<one or two line musician-to-musician confirmation>"
+  "tags": ["<tag>", ...]
 }}
 
 Rules:
@@ -69,9 +73,7 @@ Rules:
   Functional:     "drone-pad-opening", "bridge-variation-strings"
 
   Never use a slug so generic it could describe anything.
-- if version > 1, acknowledge it naturally in the message
-- message: one line confirming what was filed, ask at most one question
-  if something critical is missing
+- tags: pick from the palette in the soul above. Do not invent moods.
 """
 
 
@@ -121,14 +123,12 @@ def respond_to_audio(
             "project": data.get("project", "sketches"),
             "slug": slug,
             "tags": data.get("tags", []),
-            "message": data.get("message", "filed."),
         }
-    except Exception as e:
+    except Exception:
         return {
             "project": "sketches",
             "slug": f"untitled-{_timestamp()}",
             "tags": [],
-            "message": f"filed (llm error: {e}). what's this for?",
         }
 
 

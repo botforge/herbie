@@ -277,10 +277,16 @@ async def ingest_audio_endpoint(
         tags: list[str] = llm_result.get("tags", [])
         if proj and proj not in tags:
             tags.insert(0, proj)
-        message = llm_result.get("message", "filed.")
+
+        from services.archive import get_slug_version
+        version = get_slug_version(slug) + 1
 
         event = ingest_audio(tmp_path, slug, tags, ext, transcript)
         file_id = event["file_id"]
+
+        filename = f"{slug}_v{version}.{ext}" if version > 1 else f"{slug}.{ext}"
+        tag_str = ", ".join(tags)
+        message = f"filed\n{filename}\n[{tag_str}]"
 
         history.append({"role": "user", "content": combined_context or transcript or "(audio)"})
         history.append({"role": "assistant", "content": message})
