@@ -271,7 +271,7 @@ async def _ingest_audio(
         reply = result["message"]
 
         await _send(update, reply)
-        _push(chat_id, "user", user_context or result["transcript"] or "(voice note)")
+        _push(chat_id, "user", user_context or result.get("transcript") or "(voice note)")
         _push(chat_id, "assistant", reply)
 
     except Exception as e:
