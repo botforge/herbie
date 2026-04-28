@@ -21,7 +21,7 @@ load_dotenv()
 from services.archive import (
     RAW_DIR, ARCHIVE_ROOT,
     ensure_archive_root,
-    ingest_audio, ingest_text,
+    ingest_audio,
     get_feed, get_all_tags,
     current_entry,
     update_file_meta,
@@ -31,8 +31,6 @@ from services.archive import (
     migrate_v1,
 )
 from services.llm import (
-    detect_lyric_intent,
-    extract_lyric_project,
     format_filing_confirmation,
     respond_to_audio,
     respond_to_text,
@@ -324,7 +322,6 @@ async def ingest_audio_endpoint(
 class TextRequest(BaseModel):
     message: str
     conversation_id: str = "default"
-    project: Optional[str] = None
 
 
 def _print_job_queue():
@@ -344,42 +341,22 @@ def _print_job_queue():
 
 @app.post("/ingest/text")
 async def ingest_text_endpoint(req: TextRequest):
+    """
+    1. Pass every message directly to the LLM tool loop — no pre-classification.
+       The LLM decides whether to call file_text, edit_entries, list_entries,
+       read_entries, or queue_job based on intent.
+    2. queue_job is the one exception: it exits the tool loop early with a
+       marker string so the server can execute the side-effect job.
+    3. Everything else (lyrics, corrections, queries, chat) is handled inside
+       respond_to_text via the appropriate tool call.
+    """
     print(f"\n[HERBIE/text] === incoming: {req.message!r}")
     _print_job_queue()
     history = _conversations.get(req.conversation_id, [])
 
-    # Lyric submission
-    if detect_lyric_intent(req.message):
-        project_name = extract_lyric_project(req.message) or req.project or "sketches"
-        import re
-        text = req.message
-        for pat in [
-            r"^[a-z0-9_-]+\s+lyr(?:ic|ics)\s*\n?",
-            r"^lyr(?:ic|ics)\s+for\s+[a-z0-9_-]+\s*\n?",
-            r"^words\s+for\s+[a-z0-9_-]+\s*\n?",
-            r"^verse\s+for\s+[a-z0-9_-]+\s*\n?",
-            r"^chorus\s+for\s+[a-z0-9_-]+\s*\n?",
-            r"^hook\s+for\s+[a-z0-9_-]+\s*\n?",
-            r"^bridge\s+for\s+[a-z0-9_-]+\s*\n?",
-        ]:
-            text = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
-
-        slug = f"{project_name}-lyrics"
-        tags = [project_name, "lyric"]
-        event = ingest_text(slug, tags, text)
-        reply = f"filed as {project_name}-lyrics"
-
-        history.append({"role": "user", "content": req.message})
-        history.append({"role": "assistant", "content": reply})
-        _conversations[req.conversation_id] = history[-20:]
-        return {"message": reply, "type": "lyric", "event": event}
-
-    # LLM chat — no archive snapshot, no project inference. Tools do it.
-    print(f"[HERBIE/text] calling respond_to_text…")
     raw_reply = respond_to_text(req.message, history)
     print(f"[HERBIE/text] raw_reply prefix: {raw_reply[:120]!r}")
 
-    # Tool call: queue_job
     job_args = parse_job_marker(raw_reply)
     if job_args is not None:
         print(f"[HERBIE/text] JOB MARKER detected: {job_args}")
@@ -391,9 +368,7 @@ async def ingest_text_endpoint(req: TextRequest):
         _conversations[req.conversation_id] = history[-20:]
         return {"message": reply, "type": "job", "job": job_args}
 
-    print(f"[HERBIE/text] no job marker, treating as chat")
-
-    history.append({"role": "user", "content": req.message})
+    history.append({"role": "user",      "content": req.message})
     history.append({"role": "assistant", "content": raw_reply})
     _conversations[req.conversation_id] = history[-20:]
     return {"message": raw_reply, "type": "chat"}
