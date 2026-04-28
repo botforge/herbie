@@ -13,7 +13,6 @@ Required .env:
   TELEGRAM_ALLOWED_USER_ID=...   # your numeric Telegram user ID (optional but recommended)
 """
 
-import asyncio
 import logging
 import os
 import re
@@ -227,8 +226,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(tmp.name)
         tmp_path = tmp.name
 
-    await update.message.reply_text("filing — i'll let you know when i'm done.")
-    asyncio.create_task(_ingest_audio(update, context, tmp_path, ext="ogg"))
+    await _ingest_audio(update, context, tmp_path, ext="ogg")
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -245,8 +243,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(tmp.name)
         tmp_path = tmp.name
 
-    await update.message.reply_text("filing — i'll let you know when i'm done.")
-    asyncio.create_task(_ingest_audio(update, context, tmp_path, ext=ext))
+    await _ingest_audio(update, context, tmp_path, ext=ext)
 
 
 async def _ingest_audio(
