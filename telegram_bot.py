@@ -33,21 +33,8 @@ from telegram.ext import (
 
 load_dotenv()
 
-from services.archive import (
-    ensure_archive_root,
-    ingest_audio,
-    get_slug_version,
-)
-from services.llm import (
-    format_filing_confirmation,
-    respond_to_audio,
-    respond_to_text,
-)
-from services.transcribe import process_audio
-from services.jobs import (
-    handle_job,
-    parse_job_marker,
-)
+from services.archive import ensure_archive_root
+from services.pipeline import handle_text, handle_audio
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -218,14 +205,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_context = _extract_reply_context(update)
     llm_msg = f"[replying to: {reply_context}]\n{msg}" if reply_context else msg
 
-    raw_reply = respond_to_text(llm_msg, history)
-
-    job_args = parse_job_marker(raw_reply)
-    if job_args is not None:
-        log.info(f"[telegram] JOB MARKER: {job_args}")
-        reply = handle_job(job_args)
-    else:
-        reply = raw_reply
+    result = handle_text(llm_msg, history)
+    reply = result["message"]
 
     await _send(update, reply)
     _push(chat_id, "user", llm_msg)
@@ -275,48 +256,22 @@ async def _ingest_audio(
     ext: str,
 ):
     """
-    1. Transcribe the audio with VAD + Whisper.
-    2. Ask the LLM to name it (slug, project, tags) via respond_to_audio.
-       Pass any user caption or Whisper speech_context as extra context.
-    3. Ingest into the archive via ingest_audio, which appends an event
-       and copies the raw file to raw/.
-    4. Build the filing confirmation with format_filing_confirmation and
-       send it back — the confirmation mirrors what the web UI shows.
+    1. Forward tmp_path + any user caption to pipeline.handle_audio,
+       which transcribes, names, and ingests the file in one call.
+    2. Send the filing confirmation reply and push both sides of the
+       exchange into this chat's conversation history.
+    3. Always delete the tmp file on exit, even if the pipeline raised.
     """
     chat_id = update.effective_chat.id
     history = _history(chat_id)
 
     try:
-        processing = process_audio(tmp_path)
-        transcript = processing.get("speech_transcript", "")
-        speech_context = processing.get("speech_context", "")
+        user_context = update.message.caption or ""
+        result = handle_audio(tmp_path, ext, user_context, history)
+        reply = result["message"]
 
-        user_caption = update.message.caption or ""
-        combined_context = " | ".join(filter(None, [user_caption, speech_context]))
-
-        llm_result = respond_to_audio(
-            transcript=transcript,
-            user_context=combined_context,
-            conversation_history=history,
-            existing_version=1,
-            file_ext=ext,
-        )
-
-        slug = llm_result["slug"]
-        proj = llm_result["project"]
-        tags: list[str] = llm_result.get("tags", [])
-        if proj and proj not in tags:
-            tags.insert(0, proj)
-
-        version = get_slug_version(slug) + 1
-        ingest_audio(tmp_path, slug, tags, ext, transcript)
-
-        reply = format_filing_confirmation(
-            slug=slug, ext=ext, version=version, tags=tags, transcript=transcript,
-        )
         await _send(update, reply)
-
-        _push(chat_id, "user", combined_context or transcript or "(voice note)")
+        _push(chat_id, "user", user_context or result["transcript"] or "(voice note)")
         _push(chat_id, "assistant", reply)
 
     except Exception as e:

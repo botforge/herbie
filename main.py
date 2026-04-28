@@ -5,7 +5,6 @@ Thin transport layer. All logic in services/.
 
 import os
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -21,26 +20,16 @@ load_dotenv()
 from services.archive import (
     RAW_DIR, ARCHIVE_ROOT,
     ensure_archive_root,
-    ingest_audio,
     get_feed, get_all_tags,
     current_entry,
     update_file_meta,
     delete_file,
-    queue_job, complete_job, get_jobs,
+    queue_job, get_jobs,
     search,
     migrate_v1,
 )
-from services.llm import (
-    format_filing_confirmation,
-    respond_to_audio,
-    respond_to_text,
-)
-from services.transcribe import process_audio
-from services.jobs import (
-    execute_job,
-    handle_job,
-    parse_job_marker,
-)
+from services.jobs import execute_job
+from services.pipeline import handle_text, handle_audio
 
 # Force unbuffered stdout so [HERBIE/*] prints appear immediately under uvicorn --reload
 import functools
@@ -254,60 +243,24 @@ async def ingest_audio_endpoint(
     file: UploadFile = File(...),
     context: Optional[str] = Form(None),
     conversation_id: Optional[str] = Form(None),
-    project: Optional[str] = Form(None),
 ):
     suffix = Path(file.filename or "audio.ogg").suffix or ".ogg"
+    ext = suffix.lstrip(".")
+    conv_id = conversation_id or "default"
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
 
     try:
-        processing = process_audio(tmp_path)
-        transcript = processing.get("speech_transcript", "")
-        speech_context = processing.get("speech_context", "")
-        combined_context = " | ".join(filter(None, [context, speech_context]))
-
-        conv_id = conversation_id or "default"
         history = _conversations.get(conv_id, [])
-        ext = suffix.lstrip(".")
+        result = handle_audio(tmp_path, ext, context or "", history)
 
-        llm_result = respond_to_audio(
-            transcript=transcript,
-            user_context=combined_context,
-            conversation_history=history,
-            existing_version=1,
-            file_ext=ext,
-        )
-
-        proj = project or llm_result["project"]
-        slug = llm_result["slug"]
-        tags: list[str] = llm_result.get("tags", [])
-        if proj and proj not in tags:
-            tags.insert(0, proj)
-
-        from services.archive import get_slug_version
-        version = get_slug_version(slug) + 1
-
-        event = ingest_audio(tmp_path, slug, tags, ext, transcript)
-        file_id = event["file_id"]
-
-        message = format_filing_confirmation(
-            slug=slug, ext=ext, version=version, tags=tags, transcript=transcript,
-        )
-
-        history.append({"role": "user", "content": combined_context or transcript or "(audio)"})
-        history.append({"role": "assistant", "content": message})
+        history.append({"role": "user", "content": context or result["transcript"] or "(audio)"})
+        history.append({"role": "assistant", "content": result["message"]})
         _conversations[conv_id] = history[-20:]
 
-        return {
-            "file_id": file_id,
-            "slug": slug,
-            "tags": tags,
-            "transcript": transcript,
-            "message": message,
-        }
-
+        return result
     finally:
         try:
             os.unlink(tmp_path)
@@ -341,37 +294,16 @@ def _print_job_queue():
 
 @app.post("/ingest/text")
 async def ingest_text_endpoint(req: TextRequest):
-    """
-    1. Pass every message directly to the LLM tool loop — no pre-classification.
-       The LLM decides whether to call file_text, edit_entries, list_entries,
-       read_entries, or queue_job based on intent.
-    2. queue_job is the one exception: it exits the tool loop early with a
-       marker string so the server can execute the side-effect job.
-    3. Everything else (lyrics, corrections, queries, chat) is handled inside
-       respond_to_text via the appropriate tool call.
-    """
-    print(f"\n[HERBIE/text] === incoming: {req.message!r}")
+    print(f"\n[HERBIE/text] incoming: {req.message!r}")
     _print_job_queue()
     history = _conversations.get(req.conversation_id, [])
 
-    raw_reply = respond_to_text(req.message, history)
-    print(f"[HERBIE/text] raw_reply prefix: {raw_reply[:120]!r}")
-
-    job_args = parse_job_marker(raw_reply)
-    if job_args is not None:
-        print(f"[HERBIE/text] JOB MARKER detected: {job_args}")
-        reply = handle_job(job_args)
-        print(f"[HERBIE/text] job reply: {reply[:200]!r}")
-        _print_job_queue()
-        history.append({"role": "user",      "content": req.message})
-        history.append({"role": "assistant", "content": reply})
-        _conversations[req.conversation_id] = history[-20:]
-        return {"message": reply, "type": "job", "job": job_args}
+    result = handle_text(req.message, history)
 
     history.append({"role": "user",      "content": req.message})
-    history.append({"role": "assistant", "content": raw_reply})
+    history.append({"role": "assistant", "content": result["message"]})
     _conversations[req.conversation_id] = history[-20:]
-    return {"message": raw_reply, "type": "chat"}
+    return result
 
 
 
