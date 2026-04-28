@@ -34,7 +34,7 @@ from telegram.ext import (
 load_dotenv()
 
 from services.archive import ensure_archive_root
-from services.pipeline import handle_text, handle_audio
+from services import pipeline
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -205,7 +205,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_context = _extract_reply_context(update)
     llm_msg = f"[replying to: {reply_context}]\n{msg}" if reply_context else msg
 
-    result = handle_text(llm_msg, history)
+    result = pipeline.handle_text(llm_msg, history)
     reply = result["message"]
 
     await _send(update, reply)
@@ -267,7 +267,7 @@ async def _ingest_audio(
 
     try:
         user_context = update.message.caption or ""
-        result = handle_audio(tmp_path, ext, user_context, history)
+        result = pipeline.handle_audio(tmp_path, ext, user_context, history)
         reply = result["message"]
 
         await _send(update, reply)
