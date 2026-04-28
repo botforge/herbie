@@ -361,6 +361,38 @@ _EDIT_ENTRIES_TOOL = {
 }
 
 
+_FILE_AUDIO_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "file_audio",
+        "description": (
+            "Archive the voice recording that arrived in this turn. "
+            "Call this ONLY when the transcript contains musical, lyrical, "
+            "or creative content worth preserving — sung lyrics, hummed "
+            "melody, spoken poem, ambient sound description.\n\n"
+            "Do NOT call for voice commands, questions, or instructions — "
+            "handle those with the appropriate tool instead "
+            "(edit_entries, list_entries, read_entries, etc.).\n\n"
+            "Generate a descriptive slug and rich tags from the content."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "slug": {
+                    "type": "string",
+                    "description": "2-4 word kebab-case slug describing the content.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Project name, content type (lyric/voice-note/melody), texture tags.",
+                },
+            },
+            "required": ["slug", "tags"],
+        },
+    },
+}
+
 _JOB_MARKER = "<<<job>>>"
 
 _MAX_TOOL_ROUNDS = 4
@@ -369,20 +401,31 @@ _MAX_TOOL_ROUNDS = 4
 def respond_to_text(
     message: str,
     conversation_history: list[dict],
+    extra_tools: list[dict] | None = None,
+    extra_handlers: dict | None = None,
 ) -> str:
     """
     Multi-turn tool-calling loop.
 
-    - queue_job → returns "<<<job>>>{json}" (handled by caller for side-effects)
-    - list_entries / read_entries → data returned as tool result; LLM continues
-    - no tool call → returns plain text reply
+    1. Build the message list from history + current message.
+    2. Offer the standard tool set, prepended with any extra_tools
+       the caller supplies (e.g. file_audio for voice-note turns).
+    3A. queue_job → exits early with a marker string; caller executes
+        the side-effect job.
+    3B. Any extra_handlers are dispatched by name before the built-in
+        handlers so the caller can inject turn-scoped tools.
+    3C. All other tools (list_entries, read_entries, file_text,
+        edit_entries) are executed in-loop; result fed back to LLM.
+    4. Return the LLM's final plain-text reply.
     """
     system = _soul()
     messages = [{"role": "system", "content": system}]
     messages += conversation_history
     messages.append({"role": "user", "content": message})
 
-    tools = [_JOB_TOOL, _LIST_ENTRIES_TOOL, _READ_ENTRIES_TOOL, _FILE_TEXT_TOOL, _EDIT_ENTRIES_TOOL]
+    base_tools = [_JOB_TOOL, _LIST_ENTRIES_TOOL, _READ_ENTRIES_TOOL,
+                  _FILE_TEXT_TOOL, _EDIT_ENTRIES_TOOL]
+    tools = (extra_tools or []) + base_tools
 
     try:
         print(f"[HERBIE/llm] respond_to_text called. message={message!r}")
@@ -404,7 +447,6 @@ def respond_to_text(
             if not msg.tool_calls:
                 return (msg.content or "").strip()
 
-            # Record the assistant turn with its tool calls
             messages.append({
                 "role": "assistant",
                 "content": msg.content,
@@ -421,17 +463,17 @@ def respond_to_text(
                 ],
             })
 
-            # Execute each tool call, append results as tool messages
             for call in msg.tool_calls:
                 name = call.function.name
                 args = json.loads(call.function.arguments)
                 print(f"[HERBIE/llm] TOOL CALL → {name}({args})")
 
                 if name == "queue_job":
-                    # Exit the loop — caller handles the side-effect
                     return _JOB_MARKER + json.dumps(args)
 
-                if name == "list_entries":
+                if extra_handlers and name in extra_handlers:
+                    result = extra_handlers[name](args)
+                elif name == "list_entries":
                     result = _tool_list_entries(args)
                 elif name == "read_entries":
                     result = _tool_read_entries(args)

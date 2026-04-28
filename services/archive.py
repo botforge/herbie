@@ -170,6 +170,46 @@ def _read_events() -> list[dict]:
 
 # ── Audio ingest ─────────────────────────────────────────────────────────────
 
+def stage_audio(src_path, ext: str) -> tuple[str, Path]:
+    """
+    1. Generate a fresh file_id and copy the audio into raw/.
+    2. Return (file_id, dest_path) — no event is written yet.
+       The caller decides whether to commit or discard based on LLM intent.
+    """
+    ensure_archive_root()
+    file_id = _new_id()
+    ext = ext.lstrip(".")
+    dest = RAW_DIR / f"{file_id}.{ext}"
+    shutil.copy2(str(src_path), str(dest))
+    return file_id, dest
+
+
+def commit_audio(
+    file_id: str,
+    slug: str,
+    tags: list[str],
+    ext: str,
+    transcript: str = "",
+    parent_id: str | None = None,
+) -> dict:
+    """
+    1. Optionally inherit tags from a parent entry if parent_id is set.
+    2. Append an audio event to events.jsonl for the already-staged file.
+    3. Return the new event dict.
+    """
+    ext = ext.lstrip(".")
+    if parent_id:
+        inherited = current_entry(parent_id).get("tags", [])
+        tags = inherited + [t for t in tags if t not in inherited]
+    now = datetime.now().isoformat()
+    event = {"event_id": _new_id(), "type": "audio", "file_id": file_id,
+             "slug": slug, "tags": tags, "transcript": transcript,
+             "ext": ext, "parent_id": parent_id, "job_id": None,
+             "created_at": now}
+    _append_event(event)
+    return event
+
+
 def ingest_audio(
     src_path,
     slug: str,
@@ -178,22 +218,9 @@ def ingest_audio(
     transcript: str = "",
     parent_id: str | None = None,
 ) -> dict:
-    ensure_archive_root()
-    if parent_id:
-        inherited = current_entry(parent_id).get("tags", [])
-        tags = inherited + [t for t in tags if t not in inherited]
-
-    file_id = _new_id()
-    ext = ext.lstrip(".")
-    shutil.copy2(str(src_path), str(RAW_DIR / f"{file_id}.{ext}"))
-
-    now = datetime.now().isoformat()
-    event = {"event_id": _new_id(), "type": "audio", "file_id": file_id,
-             "slug": slug, "tags": tags, "transcript": transcript,
-             "ext": ext, "parent_id": parent_id, "job_id": None,
-             "created_at": now}
-    _append_event(event)
-    return event
+    """Stage + commit in one call — used by the web UI audio endpoint."""
+    file_id, _ = stage_audio(src_path, ext)
+    return commit_audio(file_id, slug, tags, ext, transcript, parent_id)
 
 
 # ── Text ingest ──────────────────────────────────────────────────────────────

@@ -12,8 +12,12 @@ forwarding the reply. No routing logic lives in transport code.
 
 import functools
 
-from services.llm import format_filing_confirmation, respond_to_audio, respond_to_text
-from services.archive import get_slug_version, ingest_audio
+from services.llm import (
+    _FILE_AUDIO_TOOL,
+    format_filing_confirmation,
+    respond_to_text,
+)
+from services.archive import get_slug_version, stage_audio, commit_audio
 from services.transcribe import process_audio as _transcribe
 from services.jobs import handle_job, parse_job_marker
 
@@ -49,19 +53,18 @@ def handle_audio(
     history: list[dict],
 ) -> dict:
     """
-    1. Transcribe the audio with VAD + Whisper via process_audio.
-       Combine the caller-supplied user_context with any speech_context
-       the transcriber inferred (key/BPM/etc.) into a single string.
-    2. Ask the LLM to name the entry (slug, project, tags) via
-       respond_to_audio, which returns strict JSON — no prose.
-    3. Prepend the project tag if it isn't already in the tag list,
-       then look up the current version count for the slug so the
-       confirmation filename is correct (slug.ogg vs slug_v2.ogg).
-    4. Ingest into the archive: appends an event to events.jsonl and
-       copies the raw file into raw/.
-    5. Build the filing confirmation with format_filing_confirmation
-       and return it alongside the event metadata the transport needs.
-    Returns dict: message, file_id, slug, tags, transcript.
+    1. Transcribe the audio with VAD + Whisper. Combine user_context
+       with any speech_context the transcriber inferred.
+    2. Stage the audio file into raw/ (generates file_id, copies bytes)
+       WITHOUT creating an archive event yet.
+    3. Pass the transcript to the normal LLM tool loop, prepending the
+       file_audio tool so the LLM can choose to archive the recording.
+       The file_audio handler closes over file_id so the event can be
+       committed only if the LLM decides the content is worth keeping.
+    4A. LLM calls file_audio → commit the event, return filing confirmation.
+    4B. LLM calls any other tool (edit_entries, list_entries, etc.) →
+        the instruction is executed, staged file is deleted, chat reply
+        is returned. The audio was a voice command, not a recording.
     """
     print(f"[pipeline/audio] ext={ext} context={user_context!r}")
 
@@ -70,32 +73,47 @@ def handle_audio(
     speech_context = processing.get("speech_context", "")
     combined_context = " | ".join(filter(None, [user_context, speech_context]))
 
-    llm_result = respond_to_audio(
-        transcript=transcript,
-        user_context=combined_context,
-        conversation_history=history,
-        existing_version=1,
-        file_ext=ext,
+    file_id, staged_path = stage_audio(tmp_path, ext)
+    print(f"[pipeline/audio] staged {file_id[:8]}.{ext}")
+
+    audio_note = transcript or "(no speech — instrumental or ambient)"
+    llm_message = f"[voice note] {audio_note}"
+    if combined_context:
+        llm_message = f"{combined_context}\n{llm_message}"
+
+    committed: dict = {}
+
+    def _file_audio(args: dict) -> str:
+        slug = (args.get("slug") or "untitled").strip()
+        tags: list[str] = args.get("tags") or []
+        version = get_slug_version(slug) + 1
+        event = commit_audio(file_id, slug, tags, ext, transcript)
+        msg = format_filing_confirmation(
+            slug=slug, ext=ext.lstrip("."), version=version,
+            tags=tags, transcript=transcript,
+        )
+        committed["event"] = event
+        committed["message"] = msg
+        print(f"[pipeline/audio] committed {file_id[:8]} slug={slug}")
+        return f"filed. file_id={file_id[:8]} slug={slug} tags={tags}"
+
+    raw = respond_to_text(
+        llm_message, history,
+        extra_tools=[_FILE_AUDIO_TOOL],
+        extra_handlers={"file_audio": _file_audio},
     )
 
-    slug = llm_result["slug"]
-    proj = llm_result["project"]
-    tags: list[str] = llm_result.get("tags", [])
-    if proj and proj not in tags:
-        tags.insert(0, proj)
+    if not committed:
+        staged_path.unlink(missing_ok=True)
+        print(f"[pipeline/audio] voice command — staged file deleted")
+        return {"message": raw, "type": "chat"}
 
-    version = get_slug_version(slug) + 1
-    event = ingest_audio(tmp_path, slug, tags, ext, transcript)
-
-    message = format_filing_confirmation(
-        slug=slug, ext=ext, version=version, tags=tags, transcript=transcript,
-    )
-    print(f"[pipeline/audio] filed {event['file_id'][:8]} slug={slug}")
-
+    ev = committed["event"]
     return {
-        "message": message,
-        "file_id": event["file_id"],
-        "slug": slug,
-        "tags": tags,
+        "message": committed["message"],
+        "file_id": file_id,
+        "slug": ev["slug"],
+        "tags": ev["tags"],
         "transcript": transcript,
+        "type": "audio",
     }
