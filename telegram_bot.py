@@ -35,13 +35,11 @@ load_dotenv()
 
 from services.archive import (
     ensure_archive_root,
-    file_audio,
-    file_lyrics,
-    get_next_version,
+    ingest_audio,
+    get_slug_version,
 )
 from services.llm import (
-    detect_lyric_intent,
-    extract_lyric_project,
+    format_filing_confirmation,
     respond_to_audio,
     respond_to_text,
 )
@@ -200,6 +198,16 @@ def _split(text: str, limit: int) -> list[str]:
 # ── Text handler ──────────────────────────────────────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    1. Pass every text message directly to the LLM tool loop — no
+       pre-classification. The LLM decides whether to call file_text,
+       edit_entries, list_entries, read_entries, or queue_job.
+    2. If the user is replying to a prior bot message, prepend that
+       original message as context so the LLM knows exactly which file
+       is being referenced without needing to search.
+    3. queue_job exits the tool loop early with a marker string; handle
+       the side-effect here and push the job reply to history.
+    """
     if not _is_allowed(update):
         return
 
@@ -207,40 +215,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     history = _history(chat_id)
 
-    # Lyric submission (multi-line with trigger prefix)
-    if detect_lyric_intent(msg):
-        project_name = extract_lyric_project(msg) or "sketches"
-        import re
-        text = msg
-        for pat in [
-            r"^[a-z0-9_-]+\s+lyrics?\s*\n?",
-            r"^lyrics?\s+for\s+[a-z0-9_-]+\s*\n?",
-            r"^words\s+for\s+[a-z0-9_-]+\s*\n?",
-            r"^verse\s+for\s+[a-z0-9_-]+\s*\n?",
-            r"^chorus\s+for\s+[a-z0-9_-]+\s*\n?",
-        ]:
-            text = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
-
-        _, diff_summary = file_lyrics(project_name, text)
-        reply = diff_summary
-        await _send(update, reply)
-        _push(chat_id, "user", msg)
-        _push(chat_id, "assistant", reply)
-        return
-
-    # If the user is replying to a specific Telegram message, surface that
-    # original message content to the LLM so it knows exactly which file
-    # is being referenced — even if many things were filed in between.
     reply_context = _extract_reply_context(update)
+    llm_msg = f"[replying to: {reply_context}]\n{msg}" if reply_context else msg
 
-    llm_msg = msg
-    if reply_context:
-        llm_msg = f"[replying to: {reply_context}]\n{msg}"
-
-    # LLM chat — no archive snapshot, no project inference. Tools do it.
     raw_reply = respond_to_text(llm_msg, history)
 
-    # Tool call: queue_job
     job_args = parse_job_marker(raw_reply)
     if job_args is not None:
         log.info(f"[telegram] JOB MARKER: {job_args}")
@@ -295,21 +274,26 @@ async def _ingest_audio(
     tmp_path: str,
     ext: str,
 ):
-    """Shared pipeline for voice and audio file ingestion."""
+    """
+    1. Transcribe the audio with VAD + Whisper.
+    2. Ask the LLM to name it (slug, project, tags) via respond_to_audio.
+       Pass any user caption or Whisper speech_context as extra context.
+    3. Ingest into the archive via ingest_audio, which appends an event
+       and copies the raw file to raw/.
+    4. Build the filing confirmation with format_filing_confirmation and
+       send it back — the confirmation mirrors what the web UI shows.
+    """
     chat_id = update.effective_chat.id
     history = _history(chat_id)
 
     try:
-        # 1. VAD + Whisper
         processing = process_audio(tmp_path)
         transcript = processing.get("speech_transcript", "")
         speech_context = processing.get("speech_context", "")
 
-        # Caption or reply text as additional context
         user_caption = update.message.caption or ""
         combined_context = " | ".join(filter(None, [user_caption, speech_context]))
 
-        # 2. LLM naming
         llm_result = respond_to_audio(
             transcript=transcript,
             user_context=combined_context,
@@ -318,34 +302,18 @@ async def _ingest_audio(
             file_ext=ext,
         )
 
-        proj = llm_result["project"]
         slug = llm_result["slug"]
-        tags = llm_result.get("tags", [])
-        message = llm_result.get("message", "filed.")
+        proj = llm_result["project"]
+        tags: list[str] = llm_result.get("tags", [])
+        if proj and proj not in tags:
+            tags.insert(0, proj)
 
-        # Version check
-        existing_ver = get_next_version(proj, slug)
-        if existing_ver > 1:
-            llm_result2 = respond_to_audio(
-                transcript=transcript,
-                user_context=combined_context,
-                conversation_history=history,
-                existing_version=existing_ver,
-                file_ext=ext,
-            )
-            slug = llm_result2.get("slug") or slug
-            message = llm_result2.get("message", message)
+        version = get_slug_version(slug) + 1
+        ingest_audio(tmp_path, slug, tags, ext, transcript)
 
-        # 3. Archive
-        metadata = {
-            "transcript": transcript,
-            "tags": tags,
-            "created_at": datetime.now().isoformat(),
-        }
-        saved_path = file_audio(tmp_path, slug, proj, metadata, ext=ext)
-        saved_filename = Path(saved_path).name
-
-        reply = f"{proj} / {saved_filename}\n{message}"
+        reply = format_filing_confirmation(
+            slug=slug, ext=ext, version=version, tags=tags, transcript=transcript,
+        )
         await _send(update, reply)
 
         _push(chat_id, "user", combined_context or transcript or "(voice note)")
