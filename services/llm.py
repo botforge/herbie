@@ -133,6 +133,40 @@ def respond_to_audio(
 
 
 # ---------------------------------------------------------------------------
+# Filing confirmation formatter (audio ingest reply)
+# ---------------------------------------------------------------------------
+
+def format_filing_confirmation(
+    slug: str,
+    ext: str,
+    version: int,
+    tags: list[str],
+    transcript: str,
+) -> str:
+    """
+    Build the chat reply that follows an audio ingest. Mirrors what
+    the user sees in a feed row, in a compact form.
+
+    1. First line: literal "filed" — a one-word ack so the user
+       knows the action succeeded.
+    2. Second line: the canonical filename (slug + version suffix
+       when v > 1, plus the file extension).
+    3. Third line: the tag list inside square brackets.
+    4. Fourth line (only if a transcript exists): the transcribed
+       body in quotes, so the chat reply mirrors what the user
+       sees in the web UI's transcript field. Empty transcripts
+       (instrumental, foley) are omitted entirely — no quoted
+       blanks.
+    """
+    filename = f"{slug}_v{version}.{ext}" if version > 1 else f"{slug}.{ext}"
+    tag_str  = ", ".join(tags)
+    lines    = ["filed", filename, f"[{tag_str}]"]
+    if transcript and transcript.strip():
+        lines.append(f"\"{transcript.strip()}\"")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Text / chat response
 # ---------------------------------------------------------------------------
 
@@ -268,6 +302,65 @@ _READ_ENTRIES_TOOL = {
     },
 }
 
+_EDIT_ENTRIES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "edit_entries",
+        "description": (
+            "Edit metadata on EXISTING archive entries. Use this when "
+            "the user clarifies, corrects, or retags entries that are "
+            "already filed — never use file_text for that."
+            "\n\n"
+            "Examples that should call edit_entries:"
+            "\n  - 'actually that's monastery, not underworld'"
+            "\n  - 'rename that to broken-glass-loop'"
+            "\n  - 'fix the transcript on 151cd315 — should say custom-marry'"
+            "\n  - 'retag everything tagged underworld → monastery'"
+            "\n\n"
+            "Resolve the file_id(s) first via list_entries / read_entries "
+            "if the user did not give them explicitly. If multiple "
+            "candidates plausibly match (especially for transcript / "
+            "lyric edits), ASK the user to disambiguate before calling "
+            "this tool — it is better to ask than to corrupt the wrong "
+            "entry. Only the supplied fields are changed; omitted "
+            "fields are left untouched."
+            "\n\n"
+            "All edits in a single call undo together via the server's "
+            "single-step undo, so prefer one call with multiple "
+            "file_ids over several sequential calls."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "8-hex file_ids returned by list_entries / read_entries.",
+                },
+                "slug": {
+                    "type": "string",
+                    "description": "New slug. Same kebab-case rules as ingest.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Replacement tag set. Provide the FULL desired tag list, not a delta.",
+                },
+                "transcript": {
+                    "type": "string",
+                    "description": "Replacement transcript for an audio entry. Single entry only — never bulk-edit transcripts.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Replacement text body for a text/lyric entry. Single entry only.",
+                },
+            },
+            "required": ["file_ids"],
+        },
+    },
+}
+
+
 _JOB_MARKER = "<<<job>>>"
 
 _MAX_TOOL_ROUNDS = 4
@@ -289,7 +382,7 @@ def respond_to_text(
     messages += conversation_history
     messages.append({"role": "user", "content": message})
 
-    tools = [_JOB_TOOL, _LIST_ENTRIES_TOOL, _READ_ENTRIES_TOOL, _FILE_TEXT_TOOL]
+    tools = [_JOB_TOOL, _LIST_ENTRIES_TOOL, _READ_ENTRIES_TOOL, _FILE_TEXT_TOOL, _EDIT_ENTRIES_TOOL]
 
     try:
         print(f"[HERBIE/llm] respond_to_text called. message={message!r}")
@@ -344,6 +437,8 @@ def respond_to_text(
                     result = _tool_read_entries(args)
                 elif name == "file_text":
                     result = _tool_file_text(args)
+                elif name == "edit_entries":
+                    result = _tool_edit_entries(args)
                 else:
                     result = f"unknown tool: {name}"
 
@@ -398,6 +493,39 @@ def _tool_file_text(args: dict) -> str:
     ev = ingest_text(slug, tags, text)
     fid = (ev.get("file_id") or "")[:8]
     return f"filed. file_id={fid} slug={ev.get('slug')} tags={ev.get('tags')}"
+
+
+def _tool_edit_entries(args: dict) -> str:
+    """
+    1. Read the requested file_ids and the optional new fields.
+    2. Delegate to update_files_meta which snapshots the prior
+       state to .last_action.json (one undo step covers the
+       whole batch) and rewrites events.jsonl in one pass.
+    3. Return a short human-readable summary the LLM can paraphrase
+       back to the user, including the count actually edited so the
+       LLM knows when some file_ids did not match anything live.
+    """
+    from services.archive import update_files_meta, current_entry
+    file_ids = args.get("file_ids") or []
+    if not file_ids:
+        return "error: no file_ids supplied"
+    n = update_files_meta(
+        file_ids,
+        slug=args.get("slug"),
+        tags=args.get("tags"),
+        transcript=args.get("transcript"),
+        text=args.get("text"),
+    )
+    if n == 0:
+        return "edited 0 entries (none of the supplied file_ids matched a live entry)"
+    summaries = []
+    for fid in file_ids:
+        e = current_entry(fid)
+        if not e:
+            continue
+        summaries.append(f"  {fid[:8]}  {e.get('slug', '')}  [{', '.join(e.get('tags', []))}]")
+    body = "\n".join(summaries)
+    return f"edited {n} entries:\n{body}"
 
 
 def _tool_read_entries(args: dict) -> str:

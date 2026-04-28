@@ -1,25 +1,32 @@
 """
-Archive service — flat, tag-based, event-sourced, append-only.
+Archive service — flat, tag-based, event-sourced.
 
 How to read this module:
 
   1. Layout on disk under ARCHIVE_ROOT:
-     1A. raw/           immutable originals, named {file_id}.{ext}
-     1B. events.jsonl   append-only log — the SINGLE source of truth
-     1C. jobs/          {job_id}.json per pending / done job
-     1D. summaries/     {tag}_summary.md built on demand
-  2. Every state change is a new line appended to events.jsonl. No
-     event is ever rewritten in place. Soft delete, retag, rename,
-     transcript fix — all of them are new "correction" or "delete"
-     events that fold over the original.
-  3. Reads (get_feed, get_all_tags, current_entry) replay the log to
-     compute the live view. The fold is the only place "current
-     state" exists; there is no shadow store.
+     1A. raw/                immutable audio bytes, named {file_id}.{ext}
+     1B. events.jsonl        the feed log — one line per audio/text/
+                             job/delete event
+     1C. jobs/               {job_id}.json per pending / done job
+     1D. summaries/          {tag}_summary.md built on demand
+     1E. .last_action.json   single-step undo buffer for the most
+                             recent in-place edit
+  2. Ingests append. Soft deletes append. Edits to existing entries
+     (retag, slug fix, lyric fix) rewrite the matching audio/text
+     event in events.jsonl in place — no fold layer, no correction
+     events.
+  3. Every in-place edit pre-snapshots the affected events to
+     .last_action.json. undo_last_action() restores them once;
+     subsequent edits overwrite the buffer.
+  4. Reads (get_feed, get_all_tags, current_entry) read events.jsonl
+     directly — no override layer, no derivation.
 
 Core API:
   ingest_audio(src_path, slug, tags, ext, transcript, parent_id) → event
   ingest_text(slug, tags, text, parent_id)                       → event
-  apply_correction(file_id, slug?, tags?, transcript?)           → event | None
+  update_file_meta(file_id, slug?, tags?, transcript?, text?)    → bool
+  update_files_meta(file_ids, slug?, tags?, transcript?, text?)  → int
+  undo_last_action()                                             → int
   current_entry(file_id)                                         → dict
   get_feed(tag, limit, offset)                                   → list[dict]
   get_all_tags()                                                 → list[dict]
@@ -229,80 +236,34 @@ def _deleted_ids(all_events: list[dict]) -> set[str]:
             if e.get("type") == "delete" and e.get("file_id")}
 
 
-def _fold_corrections(all_events: list[dict]) -> dict[str, dict]:
-    """
-    Replay correction events to compute the current state of each entry.
-
-    1. Walk events in the order they were written (oldest first — that
-       is the natural append order in events.jsonl).
-    2. For each correction event, look up the per-file_id state we are
-       building and overwrite only the dimensions the correction
-       carried (slug / tags / transcript).
-    3. Return a map { file_id: {slug?, tags?, transcript?} } that
-       callers can layer on top of the original audio/text event to
-       produce the folded view.
-    """
-    overrides: dict[str, dict] = {}
-    for ev in all_events:
-        if ev.get("type") != "correction":
-            continue
-        fid = ev.get("file_id")
-        if not fid:
-            continue
-        cur = overrides.setdefault(fid, {})
-        for field in ("slug", "tags", "transcript"):
-            if field in ev:
-                cur[field] = ev[field]
-    return overrides
-
-
 def current_entry(file_id: str) -> dict:
     """
-    Return the folded current state of an entry by file_id.
+    Return the audio/text event for a given file_id, or {} if it does
+    not exist or has been soft-deleted.
 
-    1. Read every event in the log.
-    2. If the file_id has a delete event, return {} — the entry is
-       gone from the user's perspective even if its bytes remain on
-       disk.
-    3. Find the originating audio/text event for the file_id. If
-       none, return {} — the file_id was never ingested.
-    4. Layer all corrections on top of the original event in
-       event-log order, so the latest user-stated truth wins per
-       dimension (slug / tags / transcript).
-    5. Alias `id` to `file_id` so legacy call sites that read
-       `entry["id"]` keep working without a rename pass.
+    1. Read every event from the log.
+    2. If a delete event names this file_id, return {} — the entry is
+       gone from the user's perspective.
+    3. Otherwise return the audio/text event for the file_id.
+    4. Alias `id` to `file_id` so legacy call sites that read
+       `entry["id"]` keep working.
+    Returning {} (rather than None) lets callers chain `.get(...)`
+    without nil-checks at every site.
     """
     all_events = _read_events()
     if file_id in _deleted_ids(all_events):
         return {}
-    origin = next(
+    target = next(
         (e for e in all_events
          if e.get("file_id") == file_id
          and e.get("type") in ("audio", "text")),
         None,
     )
-    if origin is None:
+    if target is None:
         return {}
-    overrides = _fold_corrections(all_events).get(file_id, {})
-    folded = dict(origin)
-    folded.update(overrides)
-    folded["id"] = folded.get("file_id")
-    return folded
-
-
-def _apply_overrides(event: dict, overrides: dict[str, dict]) -> dict:
-    """
-    Return a shallow copy of `event` with any per-file_id correction
-    overrides merged in. Used to fold corrections onto audio/text
-    events without mutating the original event dict.
-    """
-    fid = event.get("file_id")
-    patch = overrides.get(fid) if fid else None
-    if not patch:
-        return event
-    folded = dict(event)
-    folded.update(patch)
-    return folded
+    out = dict(target)
+    out["id"] = out.get("file_id")
+    return out
 
 
 def get_feed(tag: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
@@ -310,25 +271,16 @@ def get_feed(tag: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
     Return the user-facing feed.
 
     1. Read every event from events.jsonl.
-    2. Compute the set of file_ids that have been soft-deleted, plus
-       the per-file_id correction overrides.
-    3. Keep only audio/text events (drop meta_update, delete, and
-       correction — corrections are folded into their parent's row,
-       not shown as separate rows in the feed).
-    4. Drop entries whose file_id has been soft-deleted.
-    5. Layer correction overrides on top so each row reflects the
-       latest user-stated truth (slug, tags, transcript).
-    6. Reverse to newest-first, optionally filter by tag against the
-       FOLDED tag set, and slice for pagination.
+    2. Compute the set of file_ids that have been soft-deleted.
+    3. Keep only audio/text events whose file_id is not deleted.
+    4. Reverse to newest-first, optionally filter by tag, and slice
+       for pagination.
     """
     all_events = _read_events()
     deleted    = _deleted_ids(all_events)
-    overrides  = _fold_corrections(all_events)
-
     events = [e for e in all_events
               if e.get("type") in ("audio", "text")
               and e.get("file_id") not in deleted]
-    events = [_apply_overrides(e, overrides) for e in events]
     events.reverse()
     if tag:
         events = [e for e in events if tag in e.get("tags", [])]
@@ -337,26 +289,21 @@ def get_feed(tag: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
 
 def get_all_tags() -> list[dict]:
     """
-    Count the occurrences of every tag across the live, folded feed.
+    Count the occurrences of every tag across the live feed.
 
-    1. Read every event and compute deletions + correction overrides.
-    2. For each live audio/text entry, fold its tags through the
-       overrides (so a corrected tag set replaces the original).
-    3. Tally each tag once per entry.
-    4. Return sorted by descending count, the shape the web UI uses.
+    1. Read every event and compute deletions.
+    2. Tally each tag once per live audio/text entry.
+    3. Return sorted by descending count, the shape the web UI uses.
     """
     all_events = _read_events()
     deleted    = _deleted_ids(all_events)
-    overrides  = _fold_corrections(all_events)
-
     counts: dict[str, int] = {}
     for ev in all_events:
         if ev.get("type") not in ("audio", "text"):
             continue
         if ev.get("file_id") in deleted:
             continue
-        folded = _apply_overrides(ev, overrides)
-        for t in folded.get("tags", []):
+        for t in ev.get("tags", []):
             counts[t] = counts.get(t, 0) + 1
     return sorted([{"tag": t, "count": c} for t, c in counts.items()],
                   key=lambda x: x["count"], reverse=True)
@@ -389,67 +336,171 @@ def delete_file(file_id: str) -> bool:
     return True
 
 
-# ── Corrections (append-only metadata mutation) ──────────────────────────────
+# ── In-place edits + single-step undo ────────────────────────────────────────
+#
+# How the edit/undo pair works:
+#
+#   1. Edits rewrite the matching audio/text event in events.jsonl in
+#      place. There is no fold layer, no correction event — the log
+#      reflects current state directly.
+#   2. Before each edit, the affected events are snapshotted to
+#      ARCHIVE_ROOT/.last_action.json. This file is the entire undo
+#      buffer — it holds only the most recent action.
+#   3. undo_last_action() reads the snapshot, restores each event to
+#      its prior bytes via another _patch_events call, and clears the
+#      buffer. Subsequent undo calls return 0.
+#   4. A new edit overwrites the snapshot, so only one step of undo is
+#      ever recoverable. This matches the user need ("if the LLM
+#      messed up, let me back out") without becoming a full audit log.
 
-def apply_correction(
+_UNDO_FILE_NAME = ".last_action.json"
+
+
+def _undo_path() -> Path:
+    return ARCHIVE_ROOT / _UNDO_FILE_NAME
+
+
+def _snapshot_for_undo(snapshots: list[dict]) -> None:
+    """
+    Persist the snapshots taken during one edit action to the undo
+    buffer, replacing whatever was previously there. Each snapshot
+    is {"file_id": str, "before": <full audio/text event dict>}.
+    """
+    _undo_path().write_text(json.dumps(snapshots, indent=2))
+
+
+def _rewrite_events_with(events: list[dict], patches_by_fid: dict[str, dict]) -> None:
+    """
+    Walk an in-memory list of events, merge the supplied per-file_id
+    patch onto every matching audio/text event, and write the whole
+    log back to disk in ONE pass. Other event types and unmatched
+    events pass through unchanged.
+
+    1. The patch is a dict of fields to overlay on the event dict.
+       For partial edits this contains only the changed fields; for
+       undo restores it contains the entire prior event.
+    2. Caller is responsible for having snapshotted the before-state
+       (when needed) before calling this.
+    """
+    out_lines: list[str] = []
+    for ev in events:
+        fid = ev.get("file_id")
+        if (fid in patches_by_fid
+                and ev.get("type") in ("audio", "text")):
+            ev = {**ev, **patches_by_fid[fid]}
+        out_lines.append(json.dumps(ev))
+    EVENTS_FILE.write_text("\n".join(out_lines) + "\n")
+
+
+def update_files_meta(
+    file_ids: list[str],
+    slug: str | None = None,
+    tags: list[str] | None = None,
+    transcript: str | None = None,
+    text: str | None = None,
+) -> int:
+    """
+    Edit one or more entries in a single undoable action — one read
+    of events.jsonl, one write, regardless of batch size.
+
+    1. Build the patch dict from supplied fields. If nothing to
+       change, return 0 without touching disk.
+    2. Read events.jsonl ONCE into memory. While walking, record
+       which file_ids have been soft-deleted, and capture the
+       before-state of every requested audio/text event that is not
+       deleted.
+    3. If no requested file_id matches a live entry, return 0
+       without writing the snapshot or the log.
+    4. Otherwise write the snapshot list to .last_action.json
+       (overwriting any prior snapshot), then rewrite events.jsonl
+       ONCE with the patch applied to every captured file_id.
+    5. Return the count of entries actually edited.
+    """
+    patch: dict = {}
+    if slug       is not None: patch["slug"]       = slug
+    if tags       is not None: patch["tags"]       = tags
+    if transcript is not None: patch["transcript"] = transcript
+    if text       is not None: patch["text"]       = text
+    if not patch:
+        return 0
+
+    target  = set(file_ids)
+    events  = _read_events()
+    deleted = _deleted_ids(events)
+    captured: dict[str, dict] = {}
+    for ev in events:
+        fid = ev.get("file_id")
+        if (fid in target
+                and fid not in deleted
+                and fid not in captured
+                and ev.get("type") in ("audio", "text")):
+            captured[fid] = dict(ev)
+
+    if not captured:
+        return 0
+
+    _snapshot_for_undo([
+        {"file_id": fid, "before": before}
+        for fid, before in captured.items()
+    ])
+    _rewrite_events_with(events, {fid: patch for fid in captured})
+    return len(captured)
+
+
+def update_file_meta(
     file_id: str,
     slug: str | None = None,
     tags: list[str] | None = None,
     transcript: str | None = None,
-) -> dict | None:
+    text: str | None = None,
+) -> bool:
     """
-    Record a metadata correction against an existing entry.
-
-    1. Find the original audio/text event for `file_id` in the log.
-       If it does not exist (or is already deleted), return None and
-       do nothing — there is no entry to correct.
-    2. Build a new event of type "correction" that names the same
-       file_id and carries only the fields that should change. Fields
-       passed as None are omitted, so callers can correct one
-       dimension (e.g. just tags) without restating the others.
-    3. Append the correction event to events.jsonl. The original event
-       is NOT touched. Sidecars are NOT touched. The log is the
-       single source of truth; everything else is derived from it.
-    4. Return the new correction event so callers can render it,
-       broadcast it, or assert against it.
+    Convenience wrapper for the single-entry case — delegates to
+    update_files_meta so the snapshot + patch logic lives in exactly
+    one place. Returns True iff the entry was found and edited.
     """
+    return update_files_meta(
+        [file_id],
+        slug=slug, tags=tags, transcript=transcript, text=text,
+    ) > 0
 
-    # 1. Validate the file_id refers to an entry that actually exists
-    #    and has not been soft-deleted. We only accept corrections on
-    #    live audio/text entries — corrections-of-corrections are
-    #    intentionally not supported in this primitive.
-    all_events = _read_events()
-    deleted = _deleted_ids(all_events)
-    target = next(
-        (e for e in all_events
-         if e.get("file_id") == file_id
-         and e.get("type") in ("audio", "text")
-         and file_id not in deleted),
-        None,
-    )
-    if target is None:
-        return None
 
-    # 2. Build the correction payload. Only set fields the caller
-    #    actually supplied; missing fields = "no change to this
-    #    dimension."
-    now = datetime.now().isoformat()
-    correction = {
-        "event_id":   _new_id(),
-        "type":       "correction",
-        "file_id":    file_id,
-        "created_at": now,
+def undo_last_action() -> int:
+    """
+    Restore the snapshot saved by the most recent update_files_meta
+    call — one read of events.jsonl, one write, regardless of how
+    many entries the original action touched.
+
+    1. If the undo buffer does not exist or is unparseable, return
+       0 — nothing to roll back.
+    2. Build a {file_id: full prior event} restore map from the
+       snapshots. The patch is the entire prior event dict, so every
+       changed dimension reverts in one merge.
+    3. Read events.jsonl once into memory and rewrite it once with
+       the restore map applied to every captured file_id.
+    4. Clear the undo buffer so the next undo call is a no-op until
+       a new edit creates a fresh snapshot.
+    """
+    p = _undo_path()
+    if not p.exists():
+        return 0
+    try:
+        snapshots = json.loads(p.read_text())
+    except Exception:
+        snapshots = []
+    if not snapshots:
+        p.unlink(missing_ok=True)
+        return 0
+
+    restore = {
+        snap["file_id"]: snap["before"]
+        for snap in snapshots
+        if snap.get("file_id") and snap.get("before")
     }
-    if slug is not None:
-        correction["slug"] = slug
-    if tags is not None:
-        correction["tags"] = tags
-    if transcript is not None:
-        correction["transcript"] = transcript
-
-    # 3. Append. Nothing else is mutated.
-    _append_event(correction)
-    return correction
+    if restore:
+        _rewrite_events_with(_read_events(), restore)
+    p.unlink(missing_ok=True)
+    return len(snapshots)
 
 
 # ── Jobs ─────────────────────────────────────────────────────────────────────

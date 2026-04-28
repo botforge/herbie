@@ -1,18 +1,20 @@
 """
-Correction events: the append-only mutation primitive.
+Edit-in-place tests with single-step undo.
 
 How to read this file:
 
-  1. Every test here exercises the correction flow on a clean, isolated
-     archive (the `temp_archive` fixture). No LLM, no HTTP — pure
+  1. The archive is event-sourced for INGEST (every recording, every
+     filed text fragment is a new line in events.jsonl).
+  2. Edits to existing entries (retag, slug fix, lyric fix) rewrite
+     the matching event in place. We accept this for simplicity — no
+     fold layer, no correction events.
+  3. To compensate for the lost audit trail, every edit pre-snapshots
+     the affected events to archive/.last_action.json. A single
+     undo_last_action() call restores them. Batch edits in one call
+     are undone as one unit.
+  4. Each test below runs against a clean, isolated archive
+     (`temp_archive` fixture). No LLM, no HTTP — pure
      services.archive API.
-  2. The invariant under test: every state change is a NEW event in
-     events.jsonl. Existing events are never rewritten in place,
-     sidecars are not the source of truth, and the log alone tells the
-     full story.
-  3. We also assert the user-visible consequence: a correction shifts
-     an entry between tag filters in get_feed without touching the
-     audio event itself.
 """
 
 import json
@@ -28,19 +30,56 @@ def _events(root) -> list[dict]:
     ]
 
 
-def test_apply_correction_appends_event_without_mutating_original(
+def test_update_file_meta_edits_event_in_place(temp_archive, fake_audio):
+    """
+    1. File a parent audio entry.
+    2. Call update_file_meta to change tags + transcript.
+    3. The event log should still have ONE event for this file_id,
+       and that event should now carry the new tags + transcript.
+       The old values must be gone — that is the whole point of
+       edit-in-place.
+    """
+
+    # 1. Ingest.
+    parent = archive.ingest_audio(
+        fake_audio,
+        slug="air-conditioner-drone",
+        tags=["monastery", "foley", "drone"],
+        ext="ogg",
+        transcript="steady hum",
+    )
+
+    # 2. Edit.
+    ok = archive.update_file_meta(
+        parent["file_id"],
+        tags=["sketches", "foley", "drone"],
+        transcript="air conditioner — steady hum",
+    )
+    assert ok is True
+
+    # 3. There is still exactly one audio event for this file_id and
+    #    it carries the new values.
+    log = _events(temp_archive)
+    audio_events = [
+        ev for ev in log
+        if ev.get("type") == "audio" and ev.get("file_id") == parent["file_id"]
+    ]
+    assert len(audio_events) == 1
+    assert audio_events[0]["tags"] == ["sketches", "foley", "drone"]
+    assert audio_events[0]["transcript"] == "air conditioner — steady hum"
+
+
+def test_update_file_meta_shifts_entry_between_tag_filters(
     temp_archive, fake_audio
 ):
     """
-    Calling apply_correction must:
-      1. Append exactly one event of type "correction" referencing the
-         target file_id.
-      2. Leave the original audio event byte-identical to what was
-         written at ingest. This is the property that lets us claim the
-         event log is append-only.
+    After an in-place edit:
+      1. The entry leaves the OLD tag's filter.
+      2. The entry appears in the NEW tag's filter.
+      3. The unfiltered feed still shows it exactly once.
     """
 
-    # 1. File a parent audio entry the test will correct.
+    # 1. File the wrong-tag scenario.
     parent = archive.ingest_audio(
         fake_audio,
         slug="air-conditioner-drone",
@@ -49,62 +88,7 @@ def test_apply_correction_appends_event_without_mutating_original(
         transcript="steady hum",
     )
 
-    # 2. Snapshot the audio event verbatim so we can prove later that
-    #    nothing rewrote it.
-    before = _events(temp_archive)
-    assert len(before) == 1
-    audio_event_before = dict(before[0])
-
-    # 3. Apply a correction: the user clarifies this entry is not
-    #    monastery; it belongs in sketches.
-    archive.apply_correction(
-        parent["file_id"],
-        tags=["sketches", "foley", "drone"],
-    )
-
-    # 4. The log should now have exactly two events: the original
-    #    audio event (unchanged) and a new correction event.
-    after = _events(temp_archive)
-    assert len(after) == 2
-
-    # 5. Original audio event survives byte-for-byte.
-    #    5A. Same dict contents.
-    #    5B. Therefore same line in the JSONL — _patch_events was not
-    #        called, no rewrite happened.
-    assert after[0] == audio_event_before
-
-    # 6. New event is a correction with the expected shape.
-    correction = after[1]
-    assert correction["type"] == "correction"
-    assert correction["file_id"] == parent["file_id"]
-    assert correction["tags"] == ["sketches", "foley", "drone"]
-    assert "created_at" in correction
-
-
-def test_correction_shifts_entry_between_tag_filters(temp_archive, fake_audio):
-    """
-    After a correction changes an entry's tags, the entry must:
-      1. Disappear from filtered queries on the OLD tag.
-      2. Appear in filtered queries on the NEW tag.
-      3. Still appear (exactly once) in the unfiltered feed — the
-         correction itself does not duplicate the entry, it just
-         updates how the folded view classifies it.
-    The original audio event still lives in the log unchanged; only
-    the displayed feed reflects the latest correction.
-    """
-
-    # 1. File the same wrong-tag scenario: an air-conditioner drone
-    #    that ended up tagged "monastery" by mistake.
-    parent = archive.ingest_audio(
-        fake_audio,
-        slug="air-conditioner-drone",
-        tags=["monastery", "foley", "drone"],
-        ext="ogg",
-        transcript="steady hum",
-    )
-
-    # 2. Sanity-check: before any correction, the entry shows up
-    #    under monastery and not under sketches.
+    # 2. Sanity — pre-edit, monastery sees it, sketches doesn't.
     assert parent["file_id"] in [
         e["file_id"] for e in archive.get_feed(tag="monastery")
     ]
@@ -112,18 +96,16 @@ def test_correction_shifts_entry_between_tag_filters(temp_archive, fake_audio):
         e["file_id"] for e in archive.get_feed(tag="sketches")
     ]
 
-    # 3. Apply the correction.
-    archive.apply_correction(
+    # 3. Edit.
+    archive.update_file_meta(
         parent["file_id"],
         tags=["sketches", "foley", "drone"],
     )
 
-    # 4. After the correction:
-    #    4A. Filter by monastery: the entry is gone.
-    #    4B. Filter by sketches: the entry is now present.
-    #    4C. Unfiltered: the entry is present exactly once. The
-    #        correction is folded into the displayed view; it does
-    #        not produce a duplicate row.
+    # 4. Assertions:
+    #    4A. Monastery filter no longer includes it.
+    #    4B. Sketches filter does.
+    #    4C. Unfiltered: present exactly once.
     assert parent["file_id"] not in [
         e["file_id"] for e in archive.get_feed(tag="monastery")
     ]
@@ -133,24 +115,60 @@ def test_correction_shifts_entry_between_tag_filters(temp_archive, fake_audio):
     feed_ids = [e["file_id"] for e in archive.get_feed()]
     assert feed_ids.count(parent["file_id"]) == 1
 
-    # 5. The folded entry surfaced through get_feed should carry the
-    #    NEW tags — that is the whole point of folding.
-    folded = next(
-        e for e in archive.get_feed() if e["file_id"] == parent["file_id"]
+
+def test_update_file_meta_returns_false_for_missing_file_id(temp_archive):
+    """
+    Editing a file_id that does not exist must return False. This
+    contract lets API endpoints raise 404 cleanly without inspecting
+    the event log themselves.
+    """
+    assert archive.update_file_meta("deadbeef", tags=["whatever"]) is False
+
+
+def test_queue_job_inherits_edited_tags(temp_archive, fake_audio):
+    """
+    queue_job stamps the queued event with the parent's tags. After
+    an in-place edit, the queued job event must carry the NEW tag
+    set, not the original — otherwise derivatives stay stuck under
+    the wrong project.
+    """
+
+    # 1. Ingest with the wrong tag.
+    parent = archive.ingest_audio(
+        fake_audio,
+        slug="air-conditioner-drone",
+        tags=["monastery", "foley", "drone"],
+        ext="ogg",
+        transcript="steady hum",
     )
-    assert folded["tags"] == ["sketches", "foley", "drone"]
+
+    # 2. Edit it to the right tag.
+    archive.update_file_meta(
+        parent["file_id"],
+        tags=["sketches", "foley", "drone"],
+    )
+
+    # 3. Queue a job.
+    archive.queue_job("to_midi", parent["file_id"])
+
+    # 4. The most recent job_queued event must carry the NEW tags.
+    log = _events(temp_archive)
+    job_event = next(
+        ev for ev in reversed(log) if ev.get("type") == "job_queued"
+    )
+    assert job_event["tags"] == ["sketches", "foley", "drone"]
+    assert "monastery" not in job_event["tags"]
 
 
-def test_latest_correction_wins_per_dimension(temp_archive, fake_audio):
+def test_current_entry_returns_the_event(temp_archive, fake_audio):
     """
-    Corrections compose by replaying in event-log order:
-      1. The most recent correction for a given dimension wins.
-      2. Dimensions not touched by the latest correction fall back to
-         the previous correction (or the original event) for that
-         dimension. Corrections do not need to restate everything.
+    `current_entry(file_id)` returns the audio/text event for the
+    file_id with no fold or override layer. After an edit, it
+    reflects the edited state because the underlying event has been
+    rewritten.
     """
 
-    # 1. File a parent entry with a transcript and a tag set.
+    # 1. Ingest.
     parent = archive.ingest_audio(
         fake_audio,
         slug="religion-customary",
@@ -159,82 +177,42 @@ def test_latest_correction_wins_per_dimension(temp_archive, fake_audio):
         transcript="Religion is a customary",
     )
 
-    # 2. First correction fixes the transcript only.
-    archive.apply_correction(
-        parent["file_id"],
-        transcript="Religion is unnecessary",
-    )
+    # 2. Pre-edit: current_entry matches the original.
+    pre = archive.current_entry(parent["file_id"])
+    assert pre["slug"]       == "religion-customary"
+    assert pre["transcript"] == "Religion is a customary"
+    assert pre["tags"]       == ["monastery", "lyric"]
 
-    # 3. Second correction fixes the slug only.
-    archive.apply_correction(
-        parent["file_id"],
-        slug="religion-unnecessary",
-    )
-
-    # 4. The folded view should reflect:
-    #    4A. slug from correction #2 (the latest to touch that field).
-    #    4B. transcript from correction #1 (correction #2 did not
-    #        restate transcript, so the prior correction still
-    #        applies).
-    #    4C. tags from the original audio event (no correction has
-    #        touched tags, so they pass through).
-    folded = next(
-        e for e in archive.get_feed() if e["file_id"] == parent["file_id"]
-    )
-    assert folded["slug"]       == "religion-unnecessary"
-    assert folded["transcript"] == "Religion is unnecessary"
-    assert folded["tags"]       == ["monastery", "lyric"]
-
-
-def test_current_entry_returns_folded_state(temp_archive, fake_audio):
-    """
-    `current_entry(file_id)` should return the post-fold view of an
-    entry — original audio/text fields with corrections layered on
-    top — so callers can ask "what does this entry look like right
-    now?" without having to re-implement the fold themselves.
-    """
-
-    # 1. File an audio entry with a known tag set and transcript.
-    parent = archive.ingest_audio(
-        fake_audio,
-        slug="religion-customary",
-        tags=["monastery", "lyric"],
-        ext="ogg",
-        transcript="Religion is a customary",
-    )
-
-    # 2. Apply a correction to slug + transcript.
-    archive.apply_correction(
+    # 3. Edit slug + transcript.
+    archive.update_file_meta(
         parent["file_id"],
         slug="religion-unnecessary",
         transcript="Religion is unnecessary",
     )
 
-    # 3. current_entry should reflect the correction in slug and
-    #    transcript while preserving the untouched tags.
-    entry = archive.current_entry(parent["file_id"])
-    assert entry["slug"]       == "religion-unnecessary"
-    assert entry["transcript"] == "Religion is unnecessary"
-    assert entry["tags"]       == ["monastery", "lyric"]
-    assert entry["file_id"]    == parent["file_id"]
+    # 4. Post-edit: current_entry sees the edited values.
+    post = archive.current_entry(parent["file_id"])
+    assert post["slug"]       == "religion-unnecessary"
+    assert post["transcript"] == "Religion is unnecessary"
+    assert post["tags"]       == ["monastery", "lyric"]
 
 
-def test_current_entry_returns_empty_for_missing_or_deleted(temp_archive, fake_audio):
+def test_current_entry_returns_empty_for_missing_or_deleted(
+    temp_archive, fake_audio
+):
     """
-    `current_entry(file_id)` must return an empty dict when:
+    current_entry returns an empty dict for two cases callers care
+    about:
       1. The file_id was never ingested.
-      2. The file_id was ingested then soft-deleted. (We treat
-         deleted entries as if they no longer exist for current-state
-         lookups, which keeps callers from accidentally inheriting
-         tags from a deleted parent.)
+      2. The file_id was ingested, then soft-deleted.
     Returning {} (rather than None) lets callers chain `.get(...)`
-    safely without nil-checks at every call site.
+    without nil-checks at every call site.
     """
 
-    # 1. Missing file_id.
+    # 1. Missing.
     assert archive.current_entry("deadbeef") == {}
 
-    # 2. Ingested then deleted.
+    # 2. Deleted.
     parent = archive.ingest_audio(
         fake_audio,
         slug="quick-sketch",
@@ -246,65 +224,115 @@ def test_current_entry_returns_empty_for_missing_or_deleted(temp_archive, fake_a
     assert archive.current_entry(parent["file_id"]) == {}
 
 
-def test_queue_job_inherits_corrected_tags(temp_archive, fake_audio):
+def test_undo_reverts_a_single_edit(temp_archive, fake_audio):
     """
-    queue_job stamps the queued event with the parent's tags so the
-    feed and tag filters can show the job alongside its parent. After
-    a correction changes the parent's tags, queue_job must pick up the
-    NEW tag set, not the original one. Otherwise a corrected entry's
-    derivatives stay stuck under the old (wrong) project.
+    The cheap safety net: if the LLM edits an entry incorrectly, the
+    user can call undo_last_action() once to restore the prior state.
+
+    1. Ingest with original tags.
+    2. Edit (the "wrong" edit we want to reverse).
+    3. undo_last_action restores the original tags in the log.
+    4. The entry shows up under the original tag filter again, not
+       the edited one.
     """
 
-    # 1. File a parent audio entry tagged with the wrong project.
+    # 1. Ingest.
     parent = archive.ingest_audio(
         fake_audio,
-        slug="air-conditioner-drone",
-        tags=["monastery", "foley", "drone"],
+        slug="elephant-room",
+        tags=["monastery", "lyric"],
         ext="ogg",
-        transcript="steady hum",
+        transcript="found you waiting with the patience of an elephant",
     )
 
-    # 2. Correct the tags — the user clarifies it belongs in sketches.
-    archive.apply_correction(
+    # 2. The "bad" edit.
+    archive.update_file_meta(
         parent["file_id"],
-        tags=["sketches", "foley", "drone"],
+        tags=["sketches"],
+        transcript="totally wrong transcript",
     )
 
-    # 3. Queue a job against the corrected entry.
-    archive.queue_job("to_midi", parent["file_id"])
+    # 3. Undo.
+    restored = archive.undo_last_action()
+    assert restored == 1
 
-    # 4. Find the most recently appended job_queued event in the log.
-    log = [
-        json.loads(l)
-        for l in (temp_archive / "events.jsonl").read_text().splitlines()
-        if l
-    ]
-    job_event = next(
-        ev for ev in reversed(log) if ev.get("type") == "job_queued"
+    # 4. State matches the original ingest.
+    entry = archive.current_entry(parent["file_id"])
+    assert entry["tags"]       == ["monastery", "lyric"]
+    assert entry["transcript"] == (
+        "found you waiting with the patience of an elephant"
     )
 
-    # 5. The job event must carry the CORRECTED tag set, never the
-    #    original "monastery" tag.
-    assert job_event["tags"] == ["sketches", "foley", "drone"]
-    assert "monastery" not in job_event["tags"]
+    # 5. Tag filters reflect the restored state.
+    monastery_ids = [e["file_id"] for e in archive.get_feed(tag="monastery")]
+    sketches_ids  = [e["file_id"] for e in archive.get_feed(tag="sketches")]
+    assert parent["file_id"]     in monastery_ids
+    assert parent["file_id"] not in sketches_ids
 
 
-def test_apply_correction_on_missing_file_id_is_a_noop(temp_archive):
+def test_undo_reverts_a_batch_edit_as_one_unit(temp_archive, fake_audio):
     """
-    Applying a correction to a file_id that does not exist must:
-      1. Return None (signaling "no entry to correct").
-      2. Not append anything to events.jsonl. The log should look
-         exactly like it did before the call.
-    This protects against typos in the LLM tool call from polluting
-    the log with orphan corrections.
+    A batch edit (one call that touches multiple file_ids) is
+    snapshotted as a single action and undone as a single action.
+
+    1. Ingest two entries.
+    2. Edit BOTH in a single update_files_meta call.
+    3. One undo_last_action restores both.
     """
 
-    # 1. Snapshot the empty (or near-empty) log.
-    before = _events(temp_archive)
+    # 1. Two ingests.
+    a = archive.ingest_audio(
+        fake_audio, slug="a", tags=["monastery"], ext="ogg", transcript="A"
+    )
+    b = archive.ingest_audio(
+        fake_audio, slug="b", tags=["monastery"], ext="ogg", transcript="B"
+    )
 
-    # 2. Try to correct a file_id that was never ingested.
-    result = archive.apply_correction("deadbeef", tags=["whatever"])
+    # 2. Batch edit — both moved to sketches.
+    archive.update_files_meta(
+        [a["file_id"], b["file_id"]],
+        tags=["sketches"],
+    )
 
-    # 3. Confirm the no-op contract.
-    assert result is None
-    assert _events(temp_archive) == before
+    # 3. Confirm the edit landed.
+    assert archive.current_entry(a["file_id"])["tags"] == ["sketches"]
+    assert archive.current_entry(b["file_id"])["tags"] == ["sketches"]
+
+    # 4. One undo restores both.
+    restored = archive.undo_last_action()
+    assert restored == 2
+    assert archive.current_entry(a["file_id"])["tags"] == ["monastery"]
+    assert archive.current_entry(b["file_id"])["tags"] == ["monastery"]
+
+
+def test_undo_with_no_prior_action_is_noop(temp_archive):
+    """
+    Calling undo on a brand-new archive (or after the snapshot has
+    already been consumed by a previous undo) returns 0 and does not
+    blow up. Idempotent.
+    """
+    assert archive.undo_last_action() == 0
+    assert archive.undo_last_action() == 0
+
+
+def test_undo_only_reverts_the_most_recent_action(temp_archive, fake_audio):
+    """
+    Single-step undo by design: the snapshot file holds only the
+    most recent action. A second edit overwrites the first
+    snapshot, so undo can no longer recover the pre-first-edit
+    state.
+
+    1. Ingest.
+    2. Edit #1 (sketches).
+    3. Edit #2 (drafts).
+    4. Undo restores to AFTER edit #1, not before it.
+    """
+
+    parent = archive.ingest_audio(
+        fake_audio, slug="x", tags=["monastery"], ext="ogg", transcript=""
+    )
+    archive.update_file_meta(parent["file_id"], tags=["sketches"])
+    archive.update_file_meta(parent["file_id"], tags=["drafts"])
+
+    archive.undo_last_action()
+    assert archive.current_entry(parent["file_id"])["tags"] == ["sketches"]

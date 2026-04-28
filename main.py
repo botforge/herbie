@@ -23,8 +23,8 @@ from services.archive import (
     ensure_archive_root,
     ingest_audio, ingest_text,
     get_feed, get_all_tags,
-    apply_correction,
     current_entry,
+    update_file_meta,
     delete_file,
     queue_job, complete_job, get_jobs,
     search,
@@ -33,6 +33,7 @@ from services.archive import (
 from services.llm import (
     detect_lyric_intent,
     extract_lyric_project,
+    format_filing_confirmation,
     respond_to_audio,
     respond_to_text,
 )
@@ -167,16 +168,18 @@ class PatchFileRequest(BaseModel):
 @app.patch("/files/{file_id}")
 async def patch_file(file_id: str, req: PatchFileRequest):
     """
-    1. Inline edits from the web UI route through apply_correction so
-       the change becomes a new event in events.jsonl rather than an
-       in-place rewrite of the original ingest event.
-    2. Returns 404 if the file_id is missing or already deleted —
-       apply_correction returns None in that case.
+    1. Inline edits from the web UI rewrite the matching event in
+       place via update_file_meta.
+    2. update_file_meta also snapshots the prior state into the undo
+       buffer, so a follow-up call to undo_last_action() can restore
+       the entry if the edit was wrong.
+    3. Returns 404 if the file_id is missing or already deleted —
+       update_file_meta returns False in that case.
     """
-    result = apply_correction(
+    ok = update_file_meta(
         file_id, transcript=req.transcript, tags=req.tags,
     )
-    if result is None:
+    if not ok:
         raise HTTPException(404, "file not found")
     return {"ok": True}
 
@@ -291,9 +294,9 @@ async def ingest_audio_endpoint(
         event = ingest_audio(tmp_path, slug, tags, ext, transcript)
         file_id = event["file_id"]
 
-        filename = f"{slug}_v{version}.{ext}" if version > 1 else f"{slug}.{ext}"
-        tag_str = ", ".join(tags)
-        message = f"filed\n{filename}\n[{tag_str}]"
+        message = format_filing_confirmation(
+            slug=slug, ext=ext, version=version, tags=tags, transcript=transcript,
+        )
 
         history.append({"role": "user", "content": combined_context or transcript or "(audio)"})
         history.append({"role": "assistant", "content": message})
