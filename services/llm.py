@@ -366,14 +366,16 @@ _FILE_AUDIO_TOOL = {
     "function": {
         "name": "file_audio",
         "description": (
-            "Archive the voice recording that arrived in this turn. "
-            "Call this ONLY when the transcript contains musical, lyrical, "
-            "or creative content worth preserving — sung lyrics, hummed "
-            "melody, spoken poem, ambient sound description.\n\n"
+            "Archive the voice recording that just arrived. The audio has "
+            "already been transcribed — the transcript in this message IS "
+            "the content. You do not need to hear or retrieve anything.\n\n"
+            "Call this when the transcript contains musical, lyrical, or "
+            "creative content worth preserving — sung lyrics, hummed melody, "
+            "spoken poem, ambient sound description.\n\n"
             "Do NOT call for voice commands, questions, or instructions — "
             "handle those with the appropriate tool instead "
             "(edit_entries, list_entries, read_entries, etc.).\n\n"
-            "Generate a descriptive slug and rich tags from the content."
+            "Generate a descriptive slug and rich tags from the transcript."
         ),
         "parameters": {
             "type": "object",

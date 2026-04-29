@@ -70,16 +70,18 @@ def handle_audio(
 
     processing = _transcribe(tmp_path)
     transcript = processing.get("speech_transcript", "")
-    speech_context = processing.get("speech_context", "")
-    combined_context = " | ".join(filter(None, [user_context, speech_context]))
 
     file_id, staged_path = stage_audio(tmp_path, ext)
-    print(f"[pipeline/audio] staged {file_id[:8]}.{ext}")
+    print(f"[pipeline/audio] staged {file_id[:8]}.{ext} transcript={transcript[:60]!r}")
 
-    audio_note = transcript or "(no speech — instrumental or ambient)"
-    llm_message = f"[voice note] {audio_note}"
-    if combined_context:
-        llm_message = f"{combined_context}\n{llm_message}"
+    # Build an unambiguous message: the transcription is already done,
+    # the text below IS the content — no separate audio to retrieve.
+    body = transcript or "(no speech — instrumental or ambient recording)"
+    parts = []
+    if user_context:
+        parts.append(f"Caption: {user_context}")
+    parts.append(f'Voice note transcribed: "{body}"')
+    llm_message = "\n".join(parts)
 
     committed: dict = {}
 
