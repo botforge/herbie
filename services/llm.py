@@ -406,7 +406,7 @@ def respond_to_text(
     conversation_history: list[dict],
     extra_tools: list[dict] | None = None,
     extra_handlers: dict | None = None,
-) -> str:
+) -> tuple[str, list[dict]]:
     """
     Multi-turn tool-calling loop.
 
@@ -419,7 +419,9 @@ def respond_to_text(
         handlers so the caller can inject turn-scoped tools.
     3C. All other tools (list_entries, read_entries, file_text,
         edit_entries) are executed in-loop; result fed back to LLM.
-    4. Return the LLM's final plain-text reply.
+    4. Return (reply_str, tool_call_log) where tool_call_log is a list
+       of {name, args, result} dicts — one per tool call across all
+       rounds. Used by the conversation log for eval set construction.
     """
     system = _soul()
     messages = [{"role": "system", "content": system}]
@@ -429,6 +431,7 @@ def respond_to_text(
     base_tools = [_JOB_TOOL, _LIST_ENTRIES_TOOL, _READ_ENTRIES_TOOL,
                   _FILE_TEXT_TOOL, _EDIT_ENTRIES_TOOL]
     tools = (extra_tools or []) + base_tools
+    tool_call_log: list[dict] = []
 
     try:
         print(f"[HERBIE/llm] respond_to_text called. message={message!r}")
@@ -448,7 +451,7 @@ def respond_to_text(
             print(f"[HERBIE/llm] content={(msg.content or '')[:200]!r}")
 
             if not msg.tool_calls:
-                return (msg.content or "").strip()
+                return (msg.content or "").strip(), tool_call_log
 
             messages.append({
                 "role": "assistant",
@@ -472,7 +475,8 @@ def respond_to_text(
                 print(f"[HERBIE/llm] TOOL CALL → {name}({args})")
 
                 if name == "queue_job":
-                    return _JOB_MARKER + json.dumps(args)
+                    tool_call_log.append({"name": name, "args": args, "result": "queued"})
+                    return _JOB_MARKER + json.dumps(args), tool_call_log
 
                 if extra_handlers and name in extra_handlers:
                     result = extra_handlers[name](args)
@@ -487,6 +491,7 @@ def respond_to_text(
                 else:
                     result = f"unknown tool: {name}"
 
+                tool_call_log.append({"name": name, "args": args, "result": result[:500]})
                 messages.append({
                     "role":         "tool",
                     "tool_call_id": call.id,
@@ -494,10 +499,10 @@ def respond_to_text(
                 })
 
         print("[HERBIE/llm] max tool rounds exceeded")
-        return "(I'm stuck in a tool loop — try rephrasing.)"
+        return "(I'm stuck in a tool loop — try rephrasing.)", tool_call_log
     except Exception as e:
         print(f"[HERBIE/llm] EXCEPTION: {type(e).__name__}: {e}")
-        return f"(llm error: {e})"
+        return f"(llm error: {e})", tool_call_log
 
 
 # ---------------------------------------------------------------------------

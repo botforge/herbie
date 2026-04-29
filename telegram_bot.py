@@ -204,7 +204,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_context = _extract_reply_context(update)
     llm_msg = f"[replying to: {reply_context}]\n{msg}" if reply_context else msg
 
-    result = pipeline.handle_text(llm_msg, history)
+    result = pipeline.handle_text(llm_msg, history, transport="telegram")
     reply = result["message"]
 
     await _send(update, reply)
@@ -274,7 +274,7 @@ async def _ingest_audio(
 
     try:
         user_context = update.message.caption or ""
-        result = pipeline.handle_audio(tmp_path, ext, user_context, history)
+        result = pipeline.handle_audio(tmp_path, ext, user_context, history, transport="telegram")
         reply = result["message"]
 
         await _send(update, reply)

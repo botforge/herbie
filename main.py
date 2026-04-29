@@ -254,7 +254,7 @@ async def ingest_audio_endpoint(
 
     try:
         history = _conversations.get(conv_id, [])
-        result = handle_audio(tmp_path, ext, context or "", history)
+        result = handle_audio(tmp_path, ext, context or "", history, transport="web")
 
         history.append({"role": "user", "content": context or result["transcript"] or "(audio)"})
         history.append({"role": "assistant", "content": result["message"]})
@@ -298,7 +298,7 @@ async def ingest_text_endpoint(req: TextRequest):
     _print_job_queue()
     history = _conversations.get(req.conversation_id, [])
 
-    result = handle_text(req.message, history)
+    result = handle_text(req.message, history, transport="web")
 
     history.append({"role": "user",      "content": req.message})
     history.append({"role": "assistant", "content": result["message"]})
