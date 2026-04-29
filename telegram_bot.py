@@ -212,6 +212,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _push(chat_id, "assistant", reply)
 
 
+# ── Thinking indicator ────────────────────────────────────────────────────────
+
+async def _thinking_indicator(update: Update) -> None:
+    """Immediate placeholder sent while the pipeline processes audio.
+    Swap the string here to change the feel — this is the only place to touch."""
+    await update.message.reply_text("...")
+
+
 # ── Voice / audio handler ─────────────────────────────────────────────────────
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -261,6 +269,8 @@ async def _ingest_audio(
     """
     chat_id = update.effective_chat.id
     history = _history(chat_id)
+
+    await _thinking_indicator(update)
 
     try:
         user_context = update.message.caption or ""
