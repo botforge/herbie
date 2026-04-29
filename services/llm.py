@@ -307,9 +307,13 @@ _EDIT_ENTRIES_TOOL = {
     "function": {
         "name": "edit_entries",
         "description": (
-            "Edit metadata on EXISTING archive entries. Use this when "
-            "the user clarifies, corrects, or retags entries that are "
-            "already filed — never use file_text for that."
+            "Edit metadata on EXISTING archive entries — slug, tags, and "
+            "audio transcript only. Use this when the user clarifies, "
+            "corrects, or retags entries that are already filed."
+            "\n\n"
+            "DOES NOT change the text/lyric body. Lyric content is "
+            "append-only: to update lyrics, call file_text with the new "
+            "version. Never overwrite lyrics via edit_entries."
             "\n\n"
             "Examples that should call edit_entries:"
             "\n  - 'actually that's monastery, not underworld'"
@@ -319,11 +323,10 @@ _EDIT_ENTRIES_TOOL = {
             "\n\n"
             "Resolve the file_id(s) first via list_entries / read_entries "
             "if the user did not give them explicitly. If multiple "
-            "candidates plausibly match (especially for transcript / "
-            "lyric edits), ASK the user to disambiguate before calling "
-            "this tool — it is better to ask than to corrupt the wrong "
-            "entry. Only the supplied fields are changed; omitted "
-            "fields are left untouched."
+            "candidates plausibly match (especially for transcript edits), "
+            "ASK the user to disambiguate before calling this tool — it is "
+            "better to ask than to corrupt the wrong entry. Only the "
+            "supplied fields are changed; omitted fields are left untouched."
             "\n\n"
             "All edits in a single call undo together via the server's "
             "single-step undo, so prefer one call with multiple "
@@ -348,11 +351,7 @@ _EDIT_ENTRIES_TOOL = {
                 },
                 "transcript": {
                     "type": "string",
-                    "description": "Replacement transcript for an audio entry. Single entry only — never bulk-edit transcripts.",
-                },
-                "text": {
-                    "type": "string",
-                    "description": "Replacement text body for a text/lyric entry. Single entry only.",
+                    "description": "Corrected transcript for an audio entry. Single entry only — never bulk-edit transcripts.",
                 },
             },
             "required": ["file_ids"],
@@ -564,7 +563,6 @@ def _tool_edit_entries(args: dict) -> str:
         slug=args.get("slug"),
         tags=args.get("tags"),
         transcript=args.get("transcript"),
-        text=args.get("text"),
     )
     if n == 0:
         return "edited 0 entries (none of the supplied file_ids matched a live entry)"

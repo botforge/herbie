@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .env
 archive/
+logs/
 *.egg-info/
 dist/
 build/
