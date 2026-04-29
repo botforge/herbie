@@ -107,10 +107,8 @@ def handle_audio(
         print(f"[pipeline/audio] committed {file_id[:8]} slug={slug}")
         return f"filed. file_id={file_id[:8]} slug={slug} tags={tags}"
 
-    # Pass empty history — each voice note is a self-contained decision.
-    # Prior conversation turns confuse the model about what it can access.
     raw = respond_to_text(
-        llm_message, [],
+        llm_message, history,
         extra_tools=[_FILE_AUDIO_TOOL],
         extra_handlers={"file_audio": _file_audio},
     )
