@@ -369,13 +369,14 @@ _FILE_AUDIO_TOOL = {
             "Archive the voice recording that just arrived. The audio has "
             "already been transcribed — the transcript in this message IS "
             "the content. You do not need to hear or retrieve anything.\n\n"
-            "Call this when the transcript contains musical, lyrical, or "
-            "creative content worth preserving — sung lyrics, hummed melody, "
-            "spoken poem, ambient sound description.\n\n"
-            "Do NOT call for voice commands, questions, or instructions — "
-            "handle those with the appropriate tool instead "
-            "(edit_entries, list_entries, read_entries, etc.).\n\n"
-            "Generate a descriptive slug and rich tags from the transcript."
+            "DEFAULT ACTION: call this tool. File the recording unless the "
+            "transcript is unambiguously an instruction or question. When in "
+            "doubt — a melody fragment, a hummed idea, half-formed lyrics, "
+            "an ambient description — file it. Never ask the user to clarify "
+            "before filing. Generate a slug and tags from whatever context "
+            "the transcript provides.\n\n"
+            "Only skip filing if the transcript is clearly a command "
+            "(edit_entries, list_entries, read_entries, queue_job, etc.)."
         ),
         "parameters": {
             "type": "object",

@@ -74,13 +74,21 @@ def handle_audio(
     file_id, staged_path = stage_audio(tmp_path, ext)
     print(f"[pipeline/audio] staged {file_id[:8]}.{ext} transcript={transcript[:60]!r}")
 
-    # Build an unambiguous message: the transcription is already done,
-    # the text below IS the content — no separate audio to retrieve.
+    # Build an unambiguous message. The model must know three things:
+    # 1. Transcription is already done — this IS the content.
+    # 2. The audio file is already staged on disk — no retrieval needed.
+    # 3. Calling file_audio(slug, tags) archives both transcript + recording.
     body = transcript or "(no speech — instrumental or ambient recording)"
     parts = []
     if user_context:
         parts.append(f"Caption: {user_context}")
     parts.append(f'Voice note transcribed: "{body}"')
+    parts.append(
+        "The audio file is already staged. "
+        "Default: call file_audio(slug, tags) to archive it. "
+        "Only skip filing if the transcript is clearly an instruction or question — "
+        "when in doubt, treat it as creative content and file it."
+    )
     llm_message = "\n".join(parts)
 
     committed: dict = {}
@@ -99,8 +107,10 @@ def handle_audio(
         print(f"[pipeline/audio] committed {file_id[:8]} slug={slug}")
         return f"filed. file_id={file_id[:8]} slug={slug} tags={tags}"
 
+    # Pass empty history — each voice note is a self-contained decision.
+    # Prior conversation turns confuse the model about what it can access.
     raw = respond_to_text(
-        llm_message, history,
+        llm_message, [],
         extra_tools=[_FILE_AUDIO_TOOL],
         extra_handlers={"file_audio": _file_audio},
     )
