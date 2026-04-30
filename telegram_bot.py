@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Herbie — Telegram bot transport layer.
+Lila — Telegram bot transport layer.
 
 Calls the exact same service functions as the CLI and FastAPI server.
 All core logic lives in services/. This file is only I/O plumbing.
@@ -38,7 +38,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
-log = logging.getLogger("herbie.telegram")
+log = logging.getLogger("lila.telegram")
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -293,7 +293,7 @@ async def handle_improvements(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Init file with header if it doesn't exist
     if not _IMPROVEMENTS_FILE.exists():
-        _IMPROVEMENTS_FILE.write_text("# Herbie — improvements backlog\n\n")
+        _IMPROVEMENTS_FILE.write_text("# Lila — improvements backlog\n\n")
 
     with _IMPROVEMENTS_FILE.open("a") as f:
         f.write(f"- [{ts}] {text}\n")
@@ -317,7 +317,7 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.AUDIO | filters.Document.AUDIO, handle_audio))
 
-    log.info("Herbie bot starting...")
+    log.info("Lila bot starting...")
     app.run_polling(drop_pending_updates=True)
 
 

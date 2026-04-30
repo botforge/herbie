@@ -1,5 +1,5 @@
 """
-Herbie — FastAPI server
+Lila — FastAPI server
 Thin transport layer. All logic in services/.
 """
 
@@ -31,11 +31,11 @@ from services.archive import (
 from services.jobs import execute_job
 from services.pipeline import handle_text, handle_audio
 
-# Force unbuffered stdout so [HERBIE/*] prints appear immediately under uvicorn --reload
+# Force unbuffered stdout so [LILA/*] prints appear immediately under uvicorn --reload
 import functools
 print = functools.partial(print, flush=True)
 
-app = FastAPI(title="Herbie", description="Personal music archivist")
+app = FastAPI(title="Lila", description="Personal music archivist")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,7 +57,7 @@ async def startup():
     n = migrate_v1()
     if n:
         import logging
-        logging.getLogger("herbie").info(f"migrated {n} v1 files to event log")
+        logging.getLogger("lila").info(f"migrated {n} v1 files to event log")
     static_dir = Path(__file__).parent / "static"
     static_dir.mkdir(exist_ok=True)
 
@@ -286,7 +286,7 @@ def _print_job_queue():
             if p.suffix == ".json":
                 try: jobs.append(_j.loads(p.read_text()))
                 except Exception: pass
-    print(f"[HERBIE/queue] {len(jobs)} jobs total:")
+    print(f"[LILA/queue] {len(jobs)} jobs total:")
     for j in jobs[-10:]:
         print(f"  • {j.get('job_id')} {j.get('type')} status={j.get('status')} "
               f"input={j.get('input_file_id')} output={j.get('output_file_id')}")
@@ -294,7 +294,7 @@ def _print_job_queue():
 
 @app.post("/ingest/text")
 async def ingest_text_endpoint(req: TextRequest):
-    print(f"\n[HERBIE/text] incoming: {req.message!r}")
+    print(f"\n[LILA/text] incoming: {req.message!r}")
     _print_job_queue()
     history = _conversations.get(req.conversation_id, [])
 

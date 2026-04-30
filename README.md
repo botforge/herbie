@@ -1,9 +1,9 @@
-# Herbie
+# Lila
 
-![Herbie web UI](docs/screenshot.png)
+![Lila web UI](docs/screenshot.png)
 
-Herbie is a personal music archivist that lives in your messaging app. You
-send voice notes, audio files, and half-formed ideas. Herbie transcribes,
+Lila is a personal music archivist that lives in your messaging app. You
+send voice notes, audio files, and half-formed ideas. Lila transcribes,
 names, files, versions, and connects everything — then hands you tools when
 you need them. It never makes music for you. It makes sure nothing you make
 gets lost, and it knows enough about music history and theory to point you
@@ -19,7 +19,7 @@ The system is organized in three phases: **capture → archive → retrieval.**
 YOU
  │
  ├── voice note ─┐
- ├── text ───────┼──► HERBIE ──┬─► object store   (raw files + sidecars)
+ ├── text ───────┼──► LILA ──┬─► object store   (raw files + sidecars)
  └── job request ┘             ├─► event log      (append-only)
                                └─► job queue      (pending → done)
 ```
@@ -27,7 +27,7 @@ YOU
 ### Capture
 
 The Telegram bot is the primary ingest surface for voice notes, audio files,
-and text fragments. On submission, Herbie transcribes the audio via
+and text fragments. On submission, Lila transcribes the audio via
 faster-whisper, generates a semantic slug, and derives tags from the
 transcript, any user-supplied context, and recent conversation history.
 Explicit framing in the voice note ("possible monastery lyrics") is picked
@@ -117,8 +117,8 @@ archive/                (gitignored)
 ## Setup
 
 ```bash
-git clone https://github.com/botforge/herbie.git
-cd herbie
+git clone https://github.com/botforge/lila.git
+cd lila
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env         # or create one — see below

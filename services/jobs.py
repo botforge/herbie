@@ -64,19 +64,19 @@ def handle_job(args: dict) -> str:
     Returns the user-facing reply string.
     """
     jt = args.get("job_type", "?")
-    print(f"[HERBIE/jobs] handle_job: {args}")
+    print(f"[LILA/jobs] handle_job: {args}")
 
     if jt == "to_midi":
         fid = (args.get("file_id") or "").strip()
         if not fid:
             return "which file? give me a file_id from the archive."
         sc = current_entry(fid)
-        print(f"[HERBIE/jobs] to_midi: sidecar for {fid}: {bool(sc)}")
+        print(f"[LILA/jobs] to_midi: sidecar for {fid}: {bool(sc)}")
         if not sc:
             return f"file {fid} not found."
         ev = _generate_midi_for(sc)
         parent_slug = sc.get("slug", fid)
-        print(f"[HERBIE/jobs] to_midi: filed {ev['slug']} (parent {parent_slug})")
+        print(f"[LILA/jobs] to_midi: filed {ev['slug']} (parent {parent_slug})")
         return f"filed {ev['slug']} — midi grid derived from {parent_slug}."
 
     if jt == "render_chords":
@@ -85,7 +85,7 @@ def handle_job(args: dict) -> str:
             import re
             raw = [c.strip() for c in re.split(r"[\s,|\-–—]+", raw) if c.strip()]
         chords = [c for c in raw if _parse_chord(c)]
-        print(f"[HERBIE/jobs] render_chords: parsed {len(chords)} of {len(raw)} — {chords}")
+        print(f"[LILA/jobs] render_chords: parsed {len(chords)} of {len(raw)} — {chords}")
         if not chords:
             return "which chords? give me a progression like Em - Am - D - G."
         tag = (args.get("tag") or "").strip()
@@ -148,7 +148,7 @@ def execute_job(job: dict) -> None:
             fn(job, sc)
         except Exception as e:
             import logging
-            logging.getLogger("herbie").error(f"job {jtype} failed: {e}")
+            logging.getLogger("lila").error(f"job {jtype} failed: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

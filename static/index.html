@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Herbie</title>
+<title>Lila</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -575,7 +575,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   white-space: pre-wrap;
   word-break: break-word;
 }
-.chat-msg.herbie .body { color: var(--black); }
+.chat-msg.lila .body { color: var(--black); }
 .chat-msg.you    .body { color: var(--gray); }
 .chat-msg .body a {
   color: inherit;
@@ -656,7 +656,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header id="header">
-  <div id="header-title">Herbie</div>
+  <div id="header-title">Lila</div>
 
   <div id="header-search">
     <!-- search icon placeholder SVG -->
@@ -699,7 +699,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 
     <div id="sidebar-statement">
-      Herbie is a personal music archivist that lives in your messaging app. You send voice notes, audio files, and half-formed ideas. Herbie transcribes, names, files, versions, and connects everything — then hands you tools when you need them. It never makes music for you. It makes sure nothing you make gets lost, and it knows enough about music history and theory to point you in the right direction.
+      Lila is a personal music archivist that lives in your messaging app. You send voice notes, audio files, and half-formed ideas. Lila transcribes, names, files, versions, and connects everything — then hands you tools when you need them. It never makes music for you. It makes sure nothing you make gets lost, and it knows enough about music history and theory to point you in the right direction.
     </div>
 
     <div id="sidebar-section-head">
@@ -721,7 +721,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   <aside id="chat-col">
     <div id="chat-resize" title="drag to resize"></div>
     <div id="chat-header">
-      <span class="title">Herbie</span>
+      <span class="title">Lila</span>
       <span class="sub">archivist</span>
     </div>
     <div id="chat-log"></div>
@@ -1505,10 +1505,10 @@ async function sendMessage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: msg, conversation_id: S.conversationId }),
     });
-    appendMsg('herbie', res.message);
+    appendMsg('lila', res.message);
     await loadFeed();
   } catch (e) {
-    appendMsg('herbie', `error: ${e.message}`);
+    appendMsg('lila', `error: ${e.message}`);
   }
 }
 
@@ -1527,11 +1527,11 @@ async function uploadAudio(file) {
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     status.textContent = '';
-    appendMsg('herbie', data.message);
+    appendMsg('lila', data.message);
     await loadFeed();
   } catch (e) {
     status.textContent = '';
-    appendMsg('herbie', `upload error: ${e.message}`);
+    appendMsg('lila', `upload error: ${e.message}`);
   }
 }
 
@@ -1586,7 +1586,7 @@ document.getElementById('search-input').addEventListener('input', e => {
     return w;
   };
 
-  const saved = parseInt(localStorage.getItem('herbie.chatWidth') || '', 10);
+  const saved = parseInt(localStorage.getItem('lila.chatWidth') || '', 10);
   if (!isNaN(saved)) setWidth(saved);
 
   let dragging = false;
@@ -1600,7 +1600,7 @@ document.getElementById('search-input').addEventListener('input', e => {
     if (!dragging) return;
     // width = distance from cursor to right edge of window
     const w = setWidth(window.innerWidth - e.clientX);
-    localStorage.setItem('herbie.chatWidth', String(w));
+    localStorage.setItem('lila.chatWidth', String(w));
   });
   window.addEventListener('mouseup', () => {
     if (!dragging) return;

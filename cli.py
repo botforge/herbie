@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Herbie CLI — local interaction transport.
+Lila CLI — local interaction transport.
 
 Calls the same pipeline.handle_text / pipeline.handle_audio as the
 Telegram bot and FastAPI server. No transport-specific logic — the
@@ -27,8 +27,8 @@ from services.archive import ensure_archive_root
 from services import pipeline
 
 
-def herbie_say(text: str):
-    print(f"Herbie: {text}")
+def lila_say(text: str):
+    print(f"Lila: {text}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ def run_chat():
        prefix), which the pipeline signals via type='eval' and we
        skip so they never enter LLM context.
     """
-    print("Herbie is ready. Type 'exit' to quit.\n")
+    print("Lila is ready. Type 'exit' to quit.\n")
     history: list[dict] = []
 
     while True:
@@ -60,7 +60,7 @@ def run_chat():
             break
 
         result = pipeline.handle_text(user_input, history, transport="cli")
-        herbie_say(result["message"])
+        lila_say(result["message"])
 
         if result.get("type") != "eval":
             history.append({"role": "user",      "content": user_input})
@@ -91,7 +91,7 @@ def run_audio(audio_path: str, context: str = ""):
 
     ext = path.suffix.lstrip(".") or "ogg"
     result = pipeline.handle_audio(str(path), ext, context, [], transport="cli")
-    herbie_say(result["message"])
+    lila_say(result["message"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ def run_lyrics(project: str = ""):
     ensure_archive_root()
     framed = f"Lyrics for {project}:\n\n{text}" if project else f"Lyrics:\n\n{text}"
     result = pipeline.handle_text(framed, [], transport="cli")
-    herbie_say(result["message"])
+    lila_say(result["message"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ def run_lyrics(project: str = ""):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Herbie — personal music archivist CLI")
+    parser = argparse.ArgumentParser(description="Lila — personal music archivist CLI")
     parser.add_argument("--audio",   metavar="FILE", help="ingest an audio file")
     parser.add_argument("--context", default="",     help="text context for audio")
     parser.add_argument("--project", default="",     help="project name (lyrics mode)")

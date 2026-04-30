@@ -37,7 +37,7 @@ def _soul() -> str:
     try:
         return _SOUL_PATH.read_text()
     except FileNotFoundError:
-        return "You are Herbie, a personal music archivist."
+        return "You are Lila, a personal music archivist."
 
 
 def _client() -> OpenAI:
@@ -431,9 +431,9 @@ def respond_to_text(
     tool_call_log: list[dict] = []
 
     try:
-        print(f"[HERBIE/llm] respond_to_text called. message={message!r}")
+        print(f"[LILA/llm] respond_to_text called. message={message!r}")
         for rnd in range(_MAX_TOOL_ROUNDS):
-            print(f"[HERBIE/llm] round {rnd + 1}: {len(messages)} msgs")
+            print(f"[LILA/llm] round {rnd + 1}: {len(messages)} msgs")
             resp = _client().chat.completions.create(
                 model=_model(),
                 messages=messages,
@@ -443,9 +443,9 @@ def respond_to_text(
             )
             choice = resp.choices[0]
             msg    = choice.message
-            print(f"[HERBIE/llm] finish_reason={choice.finish_reason!r}")
-            print(f"[HERBIE/llm] tool_calls={msg.tool_calls!r}")
-            print(f"[HERBIE/llm] content={(msg.content or '')[:200]!r}")
+            print(f"[LILA/llm] finish_reason={choice.finish_reason!r}")
+            print(f"[LILA/llm] tool_calls={msg.tool_calls!r}")
+            print(f"[LILA/llm] content={(msg.content or '')[:200]!r}")
 
             if not msg.tool_calls:
                 return (msg.content or "").strip(), tool_call_log
@@ -469,7 +469,7 @@ def respond_to_text(
             for call in msg.tool_calls:
                 name = call.function.name
                 args = json.loads(call.function.arguments)
-                print(f"[HERBIE/llm] TOOL CALL → {name}({args})")
+                print(f"[LILA/llm] TOOL CALL → {name}({args})")
 
                 if name == "queue_job":
                     tool_call_log.append({"name": name, "args": args, "result": "queued"})
@@ -495,10 +495,10 @@ def respond_to_text(
                     "content":      result,
                 })
 
-        print("[HERBIE/llm] max tool rounds exceeded")
+        print("[LILA/llm] max tool rounds exceeded")
         return "(I'm stuck in a tool loop — try rephrasing.)", tool_call_log
     except Exception as e:
-        print(f"[HERBIE/llm] EXCEPTION: {type(e).__name__}: {e}")
+        print(f"[LILA/llm] EXCEPTION: {type(e).__name__}: {e}")
         return f"(llm error: {e})", tool_call_log
 
 
@@ -510,7 +510,7 @@ def _tool_list_entries(args: dict) -> str:
     from services.archive import get_feed
     limit = int(args.get("limit") or 15)
     tag   = (args.get("tag") or "").strip()
-    print(f"[HERBIE/llm/list_entries] tag={tag!r} limit={limit}")
+    print(f"[LILA/llm/list_entries] tag={tag!r} limit={limit}")
 
     events = get_feed(tag=tag, limit=max(limit * 3, 40))
     files  = [e for e in events if e.get("type") in ("audio", "text", "lyric")][:limit]
@@ -534,7 +534,7 @@ def _tool_file_text(args: dict) -> str:
     text = (args.get("text") or "").strip()
     slug = (args.get("slug") or "untitled").strip()
     tags = args.get("tags") or []
-    print(f"[HERBIE/llm/file_text] slug={slug!r} tags={tags} text_len={len(text)}")
+    print(f"[LILA/llm/file_text] slug={slug!r} tags={tags} text_len={len(text)}")
     if not text:
         return "error: no text supplied"
     ev = ingest_text(slug, tags, text)
@@ -580,7 +580,7 @@ def _tool_read_entries(args: dict) -> str:
     from services.archive import get_feed
     limit = int(args.get("limit") or 30)
     tag   = (args.get("tag") or "").strip()
-    print(f"[HERBIE/llm/read_entries] tag={tag!r} limit={limit}")
+    print(f"[LILA/llm/read_entries] tag={tag!r} limit={limit}")
 
     events = get_feed(tag=tag, limit=max(limit * 2, 60))
     fragments = []
@@ -616,7 +616,7 @@ def _tool_read_entries(args: dict) -> str:
     if not fragments:
         return f"no readable entries tagged {tag}" if tag else "no readable entries"
 
-    print(f"[HERBIE/llm/read_entries] returning {len(fragments)} fragments")
+    print(f"[LILA/llm/read_entries] returning {len(fragments)} fragments")
     return "\n\n---\n\n".join(reversed(fragments))
 
 
@@ -633,7 +633,7 @@ def summarize_tag(tag: str) -> str:
     """
     from services.archive import get_feed
     events = list(reversed(get_feed(tag=tag, limit=500)))
-    print(f"[HERBIE/llm/summarize] tag={tag!r} got {len(events)} events total")
+    print(f"[LILA/llm/summarize] tag={tag!r} got {len(events)} events total")
 
     fragments = []
     for e in events:
@@ -648,12 +648,12 @@ def summarize_tag(tag: str) -> str:
         kind = "lyric" if etype in ("text", "lyric") else "voice-note"
         fragments.append(f"[{when}] ({kind} · {slug})\n{body}")
 
-    print(f"[HERBIE/llm/summarize] {len(fragments)} text/transcript fragments extracted")
+    print(f"[LILA/llm/summarize] {len(fragments)} text/transcript fragments extracted")
     if not fragments:
         return f"no text entries for tag: {tag}"
 
     combined = "\n\n---\n\n".join(fragments)
-    print(f"[HERBIE/llm/summarize] combined length: {len(combined)} chars")
+    print(f"[LILA/llm/summarize] combined length: {len(combined)} chars")
     system = (
         _soul()
         + "\n\nYou are reading multiple iterations of lyrics/ideas for a song, "
@@ -666,15 +666,15 @@ def summarize_tag(tag: str) -> str:
         {"role": "user", "content": f"Summarise the latest lyrics for '{tag}':\n\n{combined}"},
     ]
     try:
-        print(f"[HERBIE/llm/summarize] calling LLM…")
+        print(f"[LILA/llm/summarize] calling LLM…")
         resp = _client().chat.completions.create(
             model=_model(), messages=messages, temperature=0.3
         )
         out = resp.choices[0].message.content.strip()
-        print(f"[HERBIE/llm/summarize] got {len(out)} chars back")
+        print(f"[LILA/llm/summarize] got {len(out)} chars back")
         return out
     except Exception as e:
-        print(f"[HERBIE/llm/summarize] EXCEPTION: {type(e).__name__}: {e}")
+        print(f"[LILA/llm/summarize] EXCEPTION: {type(e).__name__}: {e}")
         return f"(summarise error: {e})"
 
 
