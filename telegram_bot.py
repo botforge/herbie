@@ -15,7 +15,6 @@ Required .env:
 
 import logging
 import os
-import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -109,66 +108,44 @@ def _extract_reply_context(update: Update) -> str | None:
     return " | ".join(parts) if parts else None
 
 
-AUDIO_MARKER_RE = re.compile(r"\[\[audio:([a-fA-F0-9]{8})\]\]")
-
-
-async def _send(update: Update, text: str):
+async def _send(update: Update, segments: list[dict]):
     """
-    Send a reply, expanding [[audio:<file_id>]] markers into actual file
-    attachments (sendDocument — preserves filename and lets the user save
-    the raw audio). Text chunks between markers go as reply_text.
+    Render a pre-parsed segment list (built by services.pipeline) into
+    Telegram primitives. The parsing/resolution logic lives upstream;
+    this function only knows three Telegram-specific things:
+      1. text → reply_text, chunked to Telegram's 4096-char limit
+      2. audio → reply_document so the user can save the file
+      3. audio_miss → short fallback text so the user sees something
+
+    If the reply produced no segments at all, send a placeholder so
+    the user always gets visible feedback.
     """
-    from services.archive import RAW_DIR, current_entry
     from telegram import InputFile
 
-    markers = list(AUDIO_MARKER_RE.finditer(text))
-    log.info(f"[telegram/_send] reply_len={len(text)} markers={[m.group(1) for m in markers]}")
+    log.info(f"[telegram/_send] segments={len(segments)}")
 
-    if not markers:
-        if not text.strip():
-            await update.message.reply_text("(empty response)")
-            return
-        for chunk in _split(text, 4096):
-            await update.message.reply_text(chunk)
+    if not segments:
+        await update.message.reply_text("(empty response)")
         return
 
-    last = 0
-    for m in markers:
-        pre = text[last : m.start()].strip()
-        if pre:
-            for chunk in _split(pre, 4096):
-                await update.message.reply_text(chunk)
-
-        fid = m.group(1).lower()
-        sc  = current_entry(fid)
-        log.info(f"[telegram/_send] marker {fid} sidecar_found={bool(sc)}")
-
-        if not sc:
-            await update.message.reply_text(f"(audio {fid} not found)")
-        else:
-            ext  = "." + (sc.get("ext") or "ogg").lstrip(".")
-            path = RAW_DIR / f"{fid}{ext}"
-            log.info(f"[telegram/_send] resolving path={path} exists={path.exists()}")
-            if not path.exists():
-                await update.message.reply_text(f"(audio file missing on disk: {path.name})")
+    for seg in segments:
+        if seg["kind"] == "text":
+            for chunk in _split(seg["text"].strip(), 4096):
+                if chunk:
+                    await update.message.reply_text(chunk)
+        elif seg["kind"] == "audio":
+            try:
+                with seg["path"].open("rb") as f:
+                    doc = InputFile(f, filename=seg["filename"])
+                    await update.message.reply_document(document=doc, caption=seg["filename"])
+            except Exception as e:
+                log.error(f"[telegram/_send] send failed for {seg['file_id']}: {e}", exc_info=True)
+                await update.message.reply_text(f"(couldn't send {seg['file_id']}: {e})")
+        else:  # audio_miss
+            if seg["reason"] == "no_entry":
+                await update.message.reply_text(f"(audio {seg['file_id']} not found)")
             else:
-                slug     = sc.get("slug", "") or fid
-                filename = f"{slug}{ext}"
-                try:
-                    with path.open("rb") as f:
-                        doc = InputFile(f, filename=filename)
-                        log.info(f"[telegram/_send] reply_document for {fid} as {filename}")
-                        await update.message.reply_document(document=doc, caption=slug or None)
-                except Exception as e:
-                    log.error(f"[telegram/_send] send failed for {fid}: {e}", exc_info=True)
-                    await update.message.reply_text(f"(couldn't send {fid}: {e})")
-
-        last = m.end()
-
-    tail = text[last:].strip()
-    if tail:
-        for chunk in _split(tail, 4096):
-            await update.message.reply_text(chunk)
+                await update.message.reply_text(f"(audio file missing on disk: {seg['file_id']})")
 
 
 def _split(text: str, limit: int) -> list[str]:
@@ -205,12 +182,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     llm_msg = f"[replying to: {reply_context}]\n{msg}" if reply_context else msg
 
     result = pipeline.handle_text(llm_msg, history, transport="telegram")
-    reply = result["message"]
 
-    await _send(update, reply)
+    await _send(update, result["segments"])
     if result.get("type") != "eval":
         _push(chat_id, "user", llm_msg)
-        _push(chat_id, "assistant", reply)
+        _push(chat_id, "assistant", result["message"])
 
 
 # ── Thinking indicator ────────────────────────────────────────────────────────
@@ -276,11 +252,10 @@ async def _ingest_audio(
     try:
         user_context = update.message.caption or ""
         result = pipeline.handle_audio(tmp_path, ext, user_context, history, transport="telegram")
-        reply = result["message"]
 
-        await _send(update, reply)
+        await _send(update, result["segments"])
         _push(chat_id, "user", user_context or result.get("transcript") or "(voice note)")
-        _push(chat_id, "assistant", reply)
+        _push(chat_id, "assistant", result["message"])
 
     except Exception as e:
         log.exception("audio ingest failed")

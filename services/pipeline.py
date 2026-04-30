@@ -3,14 +3,23 @@ Transport-agnostic message pipeline.
 
 All transports (FastAPI, Telegram, WhatsApp, native app, …) call
 handle_text or handle_audio. The transport is responsible only for
-I/O: receiving the message, managing per-conversation history, and
-forwarding the reply. No routing logic lives in transport code.
+I/O: receiving the message, dispatching the returned segments to its
+native primitives (reply_text + reply_document for Telegram, JSON
+payload + frontend marker for web, etc.), and managing
+per-conversation history. No routing or parsing logic lives in
+transport code.
 
 1. handle_text  — any text message or transcribed voice command
 2. handle_audio — raw audio path + caller-supplied context string
 
-Both functions accept an optional transport= string (e.g. "telegram",
-"web") used only for the conversation log.
+Both functions return a result dict shaped like:
+  {
+    "message":  str,           # raw LLM reply, for logging + history
+    "segments": list[Segment], # parsed for rendering — text and
+                               # resolved [[audio:<id>]] markers
+    "type":     str,           # 'chat' | 'job' | 'eval' | 'audio'
+    ...                        # type-specific extras (job args, slug)
+  }
 """
 
 import functools
@@ -24,8 +33,24 @@ from services.archive import get_slug_version, stage_audio, commit_audio
 from services.transcribe import process_audio as _transcribe
 from services.jobs import handle_job, parse_job_marker
 from services.conversation_log import detect_flag, log_turn
+from services.render import parse_reply
 
 print = functools.partial(print, flush=True)
+
+
+def _result(message: str, type_: str, **extra) -> dict:
+    """
+    Build the dict every transport receives. parse_reply runs on
+    every reply, even deterministic ones (filing confirmations,
+    eval acks, job replies) — for marker-less strings it returns a
+    single text segment, so transports never special-case.
+    """
+    return {
+        "message":  message,
+        "segments": parse_reply(message),
+        "type":     type_,
+        **extra,
+    }
 
 
 def handle_text(
@@ -36,18 +61,17 @@ def handle_text(
     """
     1. Check for the eval-flag prefix (3+ threes). If present, treat
        this turn as a pure feedback note: log it, ack, and return
-       early. The LLM is never called and the turn is signalled
-       type='eval' so transports can skip pushing it into conversation
-       history (otherwise the next LLM turn would see the eval note).
+       early via _result. The LLM is never called and the turn is
+       signalled type='eval' so transports can skip pushing it into
+       conversation history.
     2. Otherwise forward to the LLM tool loop (respond_to_text). The
        LLM selects the right tool — file_text, file_system_note,
        list_entries, read_entries, or queue_job — based on intent.
     3. queue_job exits the loop early with a marker string; execute
        the job side-effect here and return a job reply.
     4. Log the full turn — input, llm_message, tool calls, reply.
-    5A. Return dict with keys: message (str), type ('chat' | 'job' |
-        'eval').
-    5B. Job replies also carry a job key with the raw job args.
+    5. Hand back the result dict via _result, which always parses the
+       reply into segments so the transport doesn't have to.
     """
     flagged, clean_message = detect_flag(message)
     print(f"[pipeline/text] flagged={flagged} message={clean_message[:80]!r}")
@@ -59,7 +83,7 @@ def handle_text(
             input_text=message, llm_message=clean_message,
             reply=ack, tool_calls=[], eval_candidate=True,
         )
-        return {"message": ack, "type": "eval"}
+        return _result(ack, "eval")
 
     raw, tool_calls = respond_to_text(clean_message, history)
 
@@ -72,14 +96,14 @@ def handle_text(
             input_text=message, llm_message=clean_message,
             reply=reply, tool_calls=tool_calls, eval_candidate=False,
         )
-        return {"message": reply, "type": "job", "job": job_args}
+        return _result(reply, "job", job=job_args)
 
     log_turn(
         transport=transport, input_type="text",
         input_text=message, llm_message=clean_message,
         reply=raw, tool_calls=tool_calls, eval_candidate=False,
     )
-    return {"message": raw, "type": "chat"}
+    return _result(raw, "chat")
 
 
 def handle_audio(
@@ -159,7 +183,7 @@ def handle_audio(
             reply=raw, tool_calls=tool_calls,
             transcript=transcript, eval_candidate=flagged,
         )
-        return {"message": raw, "type": "chat"}
+        return _result(raw, "chat")
 
     ev = committed["event"]
     reply = committed["message"]
@@ -169,11 +193,8 @@ def handle_audio(
         reply=reply, tool_calls=tool_calls,
         transcript=transcript, eval_candidate=flagged,
     )
-    return {
-        "message": reply,
-        "file_id": file_id,
-        "slug": ev["slug"],
-        "tags": ev["tags"],
-        "transcript": clean_transcript,
-        "type": "audio",
-    }
+    return _result(
+        reply, "audio",
+        file_id=file_id, slug=ev["slug"], tags=ev["tags"],
+        transcript=clean_transcript,
+    )
