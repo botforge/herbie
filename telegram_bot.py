@@ -187,7 +187,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     1. Pass every text message directly to the LLM tool loop — no
        pre-classification. The LLM decides whether to call file_text,
-       edit_entries, list_entries, read_entries, or queue_job.
+       file_system_note, list_entries, read_entries, or queue_job.
     2. If the user is replying to a prior bot message, prepend that
        original message as context so the LLM knows exactly which file
        is being referenced without needing to search.
@@ -208,8 +208,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply = result["message"]
 
     await _send(update, reply)
-    _push(chat_id, "user", llm_msg)
-    _push(chat_id, "assistant", reply)
+    if result.get("type") != "eval":
+        _push(chat_id, "user", llm_msg)
+        _push(chat_id, "assistant", reply)
 
 
 # ── Thinking indicator ────────────────────────────────────────────────────────

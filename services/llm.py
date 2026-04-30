@@ -1,11 +1,20 @@
 """
 LLM layer: OpenRouter calls via the openai SDK.
 
-Public surface (called by FastAPI routes and CLI alike):
-  respond_to_audio(transcript, key, bpm, user_context, conversation_history) → dict
-  respond_to_text(message, conversation_history) → str
-  detect_lyric_intent(text) → bool
-  append_project_note(project_name, note_type, content) → None  (fire-and-forget helper)
+Public surface:
+  respond_to_text(message, history, extra_tools?, extra_handlers?)
+      → tuple[str, list[dict]]   used by the chat / Telegram pipeline
+  respond_to_audio(transcript, user_context, history, ...)
+      → dict                     legacy CLI-only filing path
+  format_filing_confirmation(slug, ext, version, tags, transcript)
+      → str                      shared filing-reply formatter
+  summarize_tag(tag) → str       healing/summary path
+
+The chat tool surface is APPEND-ONLY: file_text, file_system_note,
+queue_job, list_entries, read_entries, plus per-turn extra tools
+(file_audio for voice-note ingest). Nothing in this loop mutates an
+existing entry — corrections are captured as system_notes that a
+downstream healing agent reconciles.
 """
 
 import functools
@@ -186,9 +195,12 @@ _JOB_TOOL = {
             "                   ['Em','Am','D','G']). Optional tag to attach."
             "\n\n"
             "Do NOT call for reading, listing, or summarizing — use "
-            "list_entries / read_entries. Never guess a file_id from prior "
-            "context. For chord rendering, pass the chord symbols the user "
-            "actually named in this message."
+            "list_entries / read_entries. Resolve the file_id yourself "
+            "from list_entries / read_entries by matching the slug, tag, "
+            "or recency the user named — never ask the user to type one. "
+            "If multiple entries plausibly match, name them back by slug "
+            "and let the user pick by name. For chord rendering, pass "
+            "the chord symbols the user actually named in this message."
         ),
         "parameters": {
             "type": "object",
@@ -200,7 +212,7 @@ _JOB_TOOL = {
                 },
                 "file_id": {
                     "type": "string",
-                    "description": "file_id supplied by the user. Required for audio jobs.",
+                    "description": "file_id you resolved via list_entries / read_entries. Required for audio jobs.",
                 },
                 "chords": {
                     "type": "array",
@@ -302,59 +314,42 @@ _READ_ENTRIES_TOOL = {
     },
 }
 
-_EDIT_ENTRIES_TOOL = {
+_FILE_SYSTEM_NOTE_TOOL = {
     "type": "function",
     "function": {
-        "name": "edit_entries",
+        "name": "file_system_note",
         "description": (
-            "Edit metadata on EXISTING archive entries — slug, tags, and "
-            "audio transcript only. Use this when the user clarifies, "
-            "corrects, or retags entries that are already filed."
+            "File a correction about an already-filed entry: wrong "
+            "slug, wrong tag, misheard transcript, deletion request, "
+            "or any other fix the user is asking for."
             "\n\n"
-            "DOES NOT change the text/lyric body. Lyric content is "
-            "append-only: to update lyrics, call file_text with the new "
-            "version. Never overwrite lyrics via edit_entries."
-            "\n\n"
-            "Examples that should call edit_entries:"
+            "Examples:"
             "\n  - 'actually that's monastery, not underworld'"
             "\n  - 'rename that to broken-glass-loop'"
-            "\n  - 'fix the transcript on 151cd315 — should say custom-marry'"
-            "\n  - 'retag everything tagged underworld → monastery'"
+            "\n  - 'fix the transcript on the religion one — should "
+            "say custom-marry, not contemporary'"
+            "\n  - 'you misheard, the lyric is X not Y'"
+            "\n  - 'delete the air-conditioner one'"
             "\n\n"
-            "Resolve the file_id(s) first via list_entries / read_entries "
-            "if the user did not give them explicitly. If multiple "
-            "candidates plausibly match (especially for transcript edits), "
-            "ASK the user to disambiguate before calling this tool — it is "
-            "better to ask than to corrupt the wrong entry. Only the "
-            "supplied fields are changed; omitted fields are left untouched."
-            "\n\n"
-            "All edits in a single call undo together via the server's "
-            "single-step undo, so prefer one call with multiple "
-            "file_ids over several sequential calls."
+            "Resolve the target_file_id yourself via list_entries / "
+            "read_entries. Never ask the user for one. If you can't "
+            "identify a specific target, file the note anyway with "
+            "target_file_id omitted. After filing, reply with a short "
+            "ack like 'noted'."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "file_ids": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "8-hex file_ids returned by list_entries / read_entries.",
-                },
-                "slug": {
+                "content": {
                     "type": "string",
-                    "description": "New slug. Same kebab-case rules as ingest.",
+                    "description": "The correction, plus enough context to identify the entry (e.g. 'religion-customary-vocal: tag should be monastery, not underworld').",
                 },
-                "tags": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Replacement tag set. Provide the FULL desired tag list, not a delta.",
-                },
-                "transcript": {
+                "target_file_id": {
                     "type": "string",
-                    "description": "Corrected transcript for an audio entry. Single entry only — never bulk-edit transcripts.",
+                    "description": "8-hex file_id of the entry being corrected, if known.",
                 },
             },
-            "required": ["file_ids"],
+            "required": ["content"],
         },
     },
 }
@@ -375,7 +370,7 @@ _FILE_AUDIO_TOOL = {
             "before filing. Generate a slug and tags from whatever context "
             "the transcript provides.\n\n"
             "Only skip filing if the transcript is clearly a command "
-            "(edit_entries, list_entries, read_entries, queue_job, etc.)."
+            "(file_system_note, list_entries, read_entries, queue_job, etc.)."
         ),
         "parameters": {
             "type": "object",
@@ -417,7 +412,10 @@ def respond_to_text(
     3B. Any extra_handlers are dispatched by name before the built-in
         handlers so the caller can inject turn-scoped tools.
     3C. All other tools (list_entries, read_entries, file_text,
-        edit_entries) are executed in-loop; result fed back to LLM.
+        file_system_note) are executed in-loop; result fed back to LLM.
+        Note: nothing in this loop mutates an existing entry —
+        corrections become append-only system_note events that a
+        downstream healing agent reconciles later.
     4. Return (reply_str, tool_call_log) where tool_call_log is a list
        of {name, args, result} dicts — one per tool call across all
        rounds. Used by the conversation log for eval set construction.
@@ -428,7 +426,7 @@ def respond_to_text(
     messages.append({"role": "user", "content": message})
 
     base_tools = [_JOB_TOOL, _LIST_ENTRIES_TOOL, _READ_ENTRIES_TOOL,
-                  _FILE_TEXT_TOOL, _EDIT_ENTRIES_TOOL]
+                  _FILE_TEXT_TOOL, _FILE_SYSTEM_NOTE_TOOL]
     tools = (extra_tools or []) + base_tools
     tool_call_log: list[dict] = []
 
@@ -485,8 +483,8 @@ def respond_to_text(
                     result = _tool_read_entries(args)
                 elif name == "file_text":
                     result = _tool_file_text(args)
-                elif name == "edit_entries":
-                    result = _tool_edit_entries(args)
+                elif name == "file_system_note":
+                    result = _tool_file_system_note(args)
                 else:
                     result = f"unknown tool: {name}"
 
@@ -544,36 +542,38 @@ def _tool_file_text(args: dict) -> str:
     return f"filed. file_id={fid} slug={ev.get('slug')} tags={ev.get('tags')}"
 
 
-def _tool_edit_entries(args: dict) -> str:
+def _tool_file_system_note(args: dict) -> str:
     """
-    1. Read the requested file_ids and the optional new fields.
-    2. Delegate to update_files_meta which snapshots the prior
-       state to .last_action.json (one undo step covers the
-       whole batch) and rewrites events.jsonl in one pass.
-    3. Return a short human-readable summary the LLM can paraphrase
-       back to the user, including the count actually edited so the
-       LLM knows when some file_ids did not match anything live.
+    1. Pull the correction content and the optional target_file_id.
+    2. If a target is supplied, inherit its current tag set so the
+       note shows up alongside the entry it references when the user
+       filters by tag. Always tack on `system-note` so a healing
+       agent can find every correction with a single tag query.
+    3. Generate a deterministic slug — `system-note-<target8>` when a
+       target is known, otherwise a timestamped slug. Slugs don't
+       matter much for system notes; the tag is the index.
+    4. Embed the target file_id at the top of the body so a healing
+       agent reading text alone can still resolve it.
+    5. Append the event via ingest_text and return a short tool-result
+       string the LLM can paraphrase back as 'noted'.
     """
-    from services.archive import update_files_meta, current_entry
-    file_ids = args.get("file_ids") or []
-    if not file_ids:
-        return "error: no file_ids supplied"
-    n = update_files_meta(
-        file_ids,
-        slug=args.get("slug"),
-        tags=args.get("tags"),
-        transcript=args.get("transcript"),
-    )
-    if n == 0:
-        return "edited 0 entries (none of the supplied file_ids matched a live entry)"
-    summaries = []
-    for fid in file_ids:
-        e = current_entry(fid)
-        if not e:
-            continue
-        summaries.append(f"  {fid[:8]}  {e.get('slug', '')}  [{', '.join(e.get('tags', []))}]")
-    body = "\n".join(summaries)
-    return f"edited {n} entries:\n{body}"
+    from services.archive import ingest_text, current_entry
+    content = (args.get("content") or "").strip()
+    if not content:
+        return "error: no content supplied for system_note"
+
+    target = (args.get("target_file_id") or "").strip()
+    inherited: list[str] = []
+    if target:
+        inherited = list(current_entry(target).get("tags", []))
+    tags = inherited + (["system-note"] if "system-note" not in inherited else [])
+
+    slug = f"system-note-{target[:8]}" if target else f"system-note-{_timestamp()}"
+    body = f"[target: {target[:8]}] {content}" if target else content
+
+    ev = ingest_text(slug, tags, body)
+    fid = (ev.get("file_id") or "")[:8]
+    return f"noted. file_id={fid} target={target[:8] if target else 'none'} tags={tags}"
 
 
 def _tool_read_entries(args: dict) -> str:

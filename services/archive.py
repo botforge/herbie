@@ -9,15 +9,17 @@ How to read this module:
                              job/delete event
      1C. jobs/               {job_id}.json per pending / done job
      1D. summaries/          {tag}_summary.md built on demand
-     1E. .last_action.json   single-step undo buffer for the most
-                             recent in-place edit
-  2. Ingests append. Soft deletes append. Edits to existing entries
-     (retag, slug fix, lyric fix) rewrite the matching audio/text
-     event in events.jsonl in place — no fold layer, no correction
-     events.
-  3. Every in-place edit pre-snapshots the affected events to
-     .last_action.json. undo_last_action() restores them once;
-     subsequent edits overwrite the buffer.
+     1E. .last_action.json   single-step undo buffer for in-place edits
+                             made through the web UI's PATCH endpoint
+  2. The Telegram / chat path is append-only: every utterance becomes
+     a new audio or text event. Corrections from the bot are filed as
+     ordinary text events tagged `system-note` (often inheriting the
+     target's tags too) so a downstream healing agent can find and
+     reconcile them without any special event type.
+  3. The web UI's PATCH endpoint can still mutate via update_files_meta
+     (user-driven, click-targeted, unambiguous). Every such edit
+     snapshots the prior state to .last_action.json so undo_last_action
+     can restore it.
   4. Reads (get_feed, get_all_tags, current_entry) read events.jsonl
      directly — no override layer, no derivation.
 
@@ -300,6 +302,8 @@ def get_feed(tag: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
     1. Read every event from events.jsonl.
     2. Compute the set of file_ids that have been soft-deleted.
     3. Keep only audio/text events whose file_id is not deleted.
+       Corrections live as text events tagged `system-note`, so they
+       flow through this same path with no special handling.
     4. Reverse to newest-first, optionally filter by tag, and slice
        for pagination.
     """
@@ -319,7 +323,9 @@ def get_all_tags() -> list[dict]:
     Count the occurrences of every tag across the live feed.
 
     1. Read every event and compute deletions.
-    2. Tally each tag once per live audio/text entry.
+    2. Tally each tag once per live audio/text entry. system-note
+       entries are normal text events, so the `system-note` tag
+       (and any inherited target tags) tallies naturally here.
     3. Return sorted by descending count, the shape the web UI uses.
     """
     all_events = _read_events()

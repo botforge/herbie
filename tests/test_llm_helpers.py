@@ -9,10 +9,12 @@ How to read this file:
      audio ingest endpoint sends back to the chat. It must match the
      compact format soul.md describes, with the transcript appended
      when present so the chat reply mirrors a feed row.
-  2. _tool_edit_entries is the in-process dispatcher that the LLM
-     tool loop calls when the model invokes the edit_entries tool.
-     It wraps update_files_meta and returns a string the LLM reads
-     back as a tool result.
+  2. _tool_file_system_note is the in-process dispatcher the LLM
+     tool loop calls when the model invokes the file_system_note
+     tool. It is the bot's only correction path — appends a text
+     event tagged `system-note` (inheriting the target's tags), so
+     the user's correction lives in the feed without mutating the
+     original entry.
 """
 
 from services import archive, llm
@@ -78,18 +80,23 @@ def test_format_filing_confirmation_omits_transcript_line_when_empty():
     assert '""' not in msg
 
 
-# ── _tool_edit_entries ─────────────────────────────────────────────────────
+# ── _tool_file_system_note ─────────────────────────────────────────────────
 
 
-def test_tool_edit_entries_retags_an_existing_entry(temp_archive, fake_audio):
+def test_tool_file_system_note_appends_a_correction_without_mutating(
+    temp_archive, fake_audio
+):
     """
-    1. File an audio entry with the wrong project tag (the LLM's
-       initial guess).
-    2. Invoke the edit_entries tool with the corrected tag set —
-       this is what the LLM should do when the user clarifies
-       "that's not underworld, that's monastery."
-    3. The underlying entry must be edited in place. get_feed
-       reflects the new tags; no new feed entry is created.
+    1. File an audio entry with the LLM's initial (wrong) tag guess.
+    2. Capture the existing tag set and feed length so we can prove
+       neither is mutated by the correction.
+    3. Invoke file_system_note with target_file_id pointing at the
+       wrong entry, plus the user's correction text.
+    4A. The original entry's tags are UNCHANGED — corrections never
+        rewrite the source. The healing agent does that later.
+    4B. The feed has grown by exactly one — a new text event tagged
+        `system-note` plus the inherited tag set so the correction
+        surfaces under the same tag filter as the entry it targets.
     """
     parent = archive.ingest_audio(
         fake_audio,
@@ -98,32 +105,56 @@ def test_tool_edit_entries_retags_an_existing_entry(temp_archive, fake_audio):
         ext="ogg",
         transcript="religion is a customary",
     )
-
+    original_tags = list(archive.current_entry(parent["file_id"])["tags"])
     pre_feed_len = len(archive.get_feed())
 
-    result = llm._tool_edit_entries({
-        "file_ids": [parent["file_id"]],
-        "tags": ["monastery", "lyric"],
+    result = llm._tool_file_system_note({
+        "content": "tag should be monastery, not underworld",
+        "target_file_id": parent["file_id"],
     })
 
-    # 1. Tool result contains a confirmation string the LLM can echo.
-    assert "1" in result          # one entry edited
-    # 2. State on disk reflects the edit.
-    entry = archive.current_entry(parent["file_id"])
-    assert entry["tags"] == ["monastery", "lyric"]
-    # 3. No NEW feed entry was created — the count is unchanged.
-    assert len(archive.get_feed()) == pre_feed_len
+    # 1. Tool result is a 'noted' confirmation string.
+    assert "noted" in result
+    # 2. Original entry's tags untouched — no in-place mutation.
+    assert archive.current_entry(parent["file_id"])["tags"] == original_tags
+    # 3. Feed grew by one new text event.
+    feed = archive.get_feed()
+    assert len(feed) == pre_feed_len + 1
+    # 4. The new event is a system-note tagged with both the
+    #    inherited project tag and `system-note`.
+    note = feed[0]
+    assert note["type"] == "text"
+    assert "system-note" in note["tags"]
+    assert "underworld" in note["tags"]
+    assert "monastery, not underworld" in note["text"]
 
 
-def test_tool_edit_entries_returns_zero_count_for_missing_file_ids(temp_archive):
+def test_tool_file_system_note_works_without_a_target(temp_archive):
     """
-    Asking edit_entries to retag a file_id that does not exist
-    should return a tool-result string indicating zero edits.
-    Never crash — the LLM must be able to read the result and
-    apologise to the user instead of erroring out the request.
+    A general correction with no specific entry to point at — e.g.
+    "stop adding the foley tag to everything" — must still file
+    cleanly. target_file_id is omitted, the note carries only the
+    `system-note` tag, and the LLM sees a 'noted' tool result.
     """
-    result = llm._tool_edit_entries({
-        "file_ids": ["deadbeef"],
-        "tags": ["whatever"],
+    pre_feed_len = len(archive.get_feed())
+
+    result = llm._tool_file_system_note({
+        "content": "stop adding the foley tag to everything",
     })
-    assert "0" in result
+
+    assert "noted" in result
+    feed = archive.get_feed()
+    assert len(feed) == pre_feed_len + 1
+    note = feed[0]
+    assert note["type"] == "text"
+    assert note["tags"] == ["system-note"]
+
+
+def test_tool_file_system_note_rejects_empty_content(temp_archive):
+    """
+    Calling file_system_note with no content returns an error
+    string instead of writing a blank event. The LLM reads the
+    error back and can recover by asking the user to elaborate.
+    """
+    result = llm._tool_file_system_note({"content": ""})
+    assert "error" in result.lower()

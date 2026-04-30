@@ -300,9 +300,10 @@ async def ingest_text_endpoint(req: TextRequest):
 
     result = handle_text(req.message, history, transport="web")
 
-    history.append({"role": "user",      "content": req.message})
-    history.append({"role": "assistant", "content": result["message"]})
-    _conversations[req.conversation_id] = history[-20:]
+    if result.get("type") != "eval":
+        history.append({"role": "user",      "content": req.message})
+        history.append({"role": "assistant", "content": result["message"]})
+        _conversations[req.conversation_id] = history[-20:]
     return result
 
 

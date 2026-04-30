@@ -1,63 +1,34 @@
 #!/usr/bin/env python3
 """
-Herbie CLI — local interaction before Telegram integration.
+Herbie CLI — local interaction transport.
+
+Calls the same pipeline.handle_text / pipeline.handle_audio as the
+Telegram bot and FastAPI server. No transport-specific logic — the
+LLM tool loop decides whether each message becomes a file_text,
+file_system_note, queue_job, or read.
 
 Usage:
   python cli.py                          # chat mode
-  python cli.py --audio file.ogg         # ingest audio
+  python cli.py --audio file.ogg         # ingest one audio file
   python cli.py --audio file.ogg --context "hospital, op-1"
-  python cli.py --lyrics                 # paste lyrics (Ctrl+D to submit)
+  python cli.py --lyrics                 # paste lyrics on stdin (Ctrl+D submits)
   python cli.py --lyrics --project hospital
 """
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from services.archive import (
-    ensure_archive_root,
-    file_audio,
-    file_lyrics,
-    get_next_version,
-    get_project_files,
-    get_projects,
-)
-from services.llm import (
-    build_archive_context,
-    detect_lyric_intent,
-    detect_read_query,
-    extract_lyric_project,
-    format_read_response,
-    respond_to_audio,
-    respond_to_text,
-)
-from services.transcribe import process_audio
+from services.archive import ensure_archive_root
+from services import pipeline
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def herbie_say(text: str):
     print(f"Herbie: {text}")
-
-
-def _infer_project(text: str, projects: list[dict]) -> str | None:
-    """Return the first project name found in text, or None."""
-    lower = text.lower()
-    for p in projects:
-        if p["name"].lower() in lower:
-            return p["name"]
-    return None
-
-
-def filed_say(filename: str):
-    print(f"-> filed as {filename}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,8 +36,16 @@ def filed_say(filename: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_chat():
+    """
+    1. Read one line at a time from stdin.
+    2. Forward it to pipeline.handle_text and print the reply.
+    3. Push the turn into a per-process conversation history so
+       multi-turn chats work — except for eval-flagged turns (333+
+       prefix), which the pipeline signals via type='eval' and we
+       skip so they never enter LLM context.
+    """
     print("Herbie is ready. Type 'exit' to quit.\n")
-    history = []
+    history: list[dict] = []
 
     while True:
         try:
@@ -80,117 +59,39 @@ def run_chat():
         if user_input.lower() in ("exit", "quit", "q"):
             break
 
-        # Lyric detection
-        if detect_lyric_intent(user_input):
-            project_name = extract_lyric_project(user_input) or "sketches"
-            import re
-            text = user_input
-            trigger_patterns = [
-                r"^[a-z0-9_-]+\s+lyr(?:ic|ics)\s*\n?",
-                r"^lyr(?:ic|ics)\s+for\s+[a-z0-9_-]+\s*\n?",
-                r"^words\s+for\s+[a-z0-9_-]+\s*\n?",
-                r"^verse\s+for\s+[a-z0-9_-]+\s*\n?",
-                r"^chorus\s+for\s+[a-z0-9_-]+\s*\n?",
-                r"^hook\s+for\s+[a-z0-9_-]+\s*\n?",
-                r"^bridge\s+for\s+[a-z0-9_-]+\s*\n?",
-            ]
-            for pat in trigger_patterns:
-                text = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
+        result = pipeline.handle_text(user_input, history, transport="cli")
+        herbie_say(result["message"])
 
-            _, diff_summary = file_lyrics(project_name, text)
-            msg = f"filed as {project_name}_lyrics — {diff_summary}."
-            herbie_say(msg)
-            history.append({"role": "user", "content": user_input})
-            history.append({"role": "assistant", "content": msg})
-            continue
-
-        all_projects = get_projects()
-        project_names = [p["name"] for p in all_projects]
-
-        # Handle read queries directly — don't send to LLM
-        read_type, read_proj = detect_read_query(user_input, project_names)
-        if read_type and read_proj:
-            files = get_project_files(read_proj)
-            reply = format_read_response(read_type, read_proj, files)
-            herbie_say(reply)
-            history.append({"role": "user", "content": user_input})
-            history.append({"role": "assistant", "content": reply})
+        if result.get("type") != "eval":
+            history.append({"role": "user",      "content": user_input})
+            history.append({"role": "assistant", "content": result["message"]})
             history = history[-20:]
-            continue
-
-        # LLM chat — inject real archive state so it doesn't hallucinate
-        active_proj = _infer_project(user_input, all_projects) or _infer_project(
-            " ".join(m["content"] for m in history[-4:]), all_projects
-        )
-        active_files = get_project_files(active_proj) if active_proj else None
-        archive_ctx = build_archive_context(all_projects, active_proj or "", active_files)
-        raw_reply = respond_to_text(user_input, history, archive_context=archive_ctx)
-        herbie_say(raw_reply)
-        history.append({"role": "user", "content": user_input})
-        history.append({"role": "assistant", "content": raw_reply})
-        history = history[-20:]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Audio mode
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_audio(audio_path: str, context: str = "", project: str = ""):
+def run_audio(audio_path: str, context: str = ""):
+    """
+    1. Resolve the on-disk file and ensure the archive exists.
+    2. Forward path + ext + caller-supplied context to
+       pipeline.handle_audio. The pipeline transcribes, stages the
+       file, lets the LLM choose to file_audio or treat it as a
+       voice command, and commits or discards accordingly.
+    3. Print the reply (filing confirmation or chat-style response).
+    """
     path = Path(audio_path)
     if not path.exists():
         print(f"Error: file not found: {audio_path}", file=sys.stderr)
         sys.exit(1)
 
+    ensure_archive_root()
     print(f"Processing {path.name}...")
 
-    ensure_archive_root()
-
-    processing = process_audio(str(path))
-    transcript = processing.get("speech_transcript", "")
-    speech_context = processing.get("speech_context", "")
-    key = processing.get("key", "unknown")
-    bpm = processing.get("bpm")
-
-    short = transcript[:80] + "..." if len(transcript) > 80 else transcript or "(none)"
-    print(f"  transcript: {short}")
-
-    combined_context = " | ".join(filter(None, [context, speech_context]))
-    ext = path.suffix.lstrip(".")
-
-    llm_result = respond_to_audio(
-        transcript=transcript,
-        user_context=combined_context,
-        conversation_history=[],
-        existing_version=1,
-        file_ext=ext,
-    )
-
-    proj = project or llm_result["project"]
-    slug = llm_result["slug"]
-    tags = llm_result.get("tags", [])
-    message = llm_result.get("message", "filed.")
-
-    existing_ver = get_next_version(proj, slug)
-    if existing_ver > 1:
-        llm_result2 = respond_to_audio(
-            transcript=transcript,
-            user_context=combined_context,
-            conversation_history=[],
-            existing_version=existing_ver,
-            file_ext=ext,
-        )
-        slug = llm_result2["slug"] or slug
-        message = llm_result2.get("message", message)
-
-    metadata = {
-        "transcript": transcript,
-        "tags": tags,
-        "created_at": datetime.now().isoformat(),
-    }
-    saved_path = file_audio(str(path), slug, proj, metadata, ext=ext)
-
-    herbie_say(message)
-    filed_say(Path(saved_path).name)
+    ext = path.suffix.lstrip(".") or "ogg"
+    result = pipeline.handle_audio(str(path), ext, context, [], transport="cli")
+    herbie_say(result["message"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -198,8 +99,13 @@ def run_audio(audio_path: str, context: str = "", project: str = ""):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_lyrics(project: str = ""):
-    proj = project or "sketches"
-    print(f"Lyrics mode — project: {proj}")
+    """
+    1. Read the lyric paste from stdin (Ctrl+D ends).
+    2. Frame it with the optional project hint so the LLM tags the
+       new file_text event correctly, then forward to
+       pipeline.handle_text. The LLM picks the slug and tag set.
+    """
+    print("Lyrics mode" + (f" — project: {project}" if project else "") + ".")
     print("Paste or type lyrics below. Press Ctrl+D when done.\n")
 
     try:
@@ -213,8 +119,9 @@ def run_lyrics(project: str = ""):
         return
 
     ensure_archive_root()
-    _, diff_summary = file_lyrics(proj, text)
-    herbie_say(diff_summary)
+    framed = f"Lyrics for {project}:\n\n{text}" if project else f"Lyrics:\n\n{text}"
+    result = pipeline.handle_text(framed, [], transport="cli")
+    herbie_say(result["message"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,17 +129,15 @@ def run_lyrics(project: str = ""):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Herbie — personal music archivist CLI"
-    )
-    parser.add_argument("--audio", metavar="FILE", help="ingest an audio file")
-    parser.add_argument("--context", default="", help="text context for audio")
-    parser.add_argument("--project", default="", help="project name override")
-    parser.add_argument("--lyrics", action="store_true", help="lyrics input mode")
+    parser = argparse.ArgumentParser(description="Herbie — personal music archivist CLI")
+    parser.add_argument("--audio",   metavar="FILE", help="ingest an audio file")
+    parser.add_argument("--context", default="",     help="text context for audio")
+    parser.add_argument("--project", default="",     help="project name (lyrics mode)")
+    parser.add_argument("--lyrics",  action="store_true", help="lyrics input mode")
     args = parser.parse_args()
 
     if args.audio:
-        run_audio(args.audio, context=args.context, project=args.project)
+        run_audio(args.audio, context=args.context)
     elif args.lyrics:
         run_lyrics(project=args.project)
     else:

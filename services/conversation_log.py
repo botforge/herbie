@@ -5,12 +5,16 @@ Append-only conversation log for eval set construction.
    JSON line to logs/conversations.jsonl. Fields: turn_id, ts,
    transport, input_type, input, transcript, llm_message, tool_calls,
    reply, eval_candidate.
-2. Messages prefixed with 3+ threes (e.g. "3333333 what should happen")
-   are marked eval_candidate=true and the prefix is stripped before the
-   message reaches the LLM, so the bot behaves normally but the log
-   records that this turn was nominated for the eval set.
+2. Text messages prefixed with 3+ threes (e.g. "3333333 should have
+   filed this differently") are intercepted by the pipeline as pure
+   feedback notes: the LLM is NOT called, conversation history is NOT
+   updated, the turn is logged with eval_candidate=true and tool_calls
+   empty, and the bot replies "flagged for eval". Use this to leave
+   meta-comments about how a prior turn went without contaminating
+   future LLM context.
 3. tool_calls is a list of {name, args, result} dicts captured during
    the LLM tool loop — the full trace needed to build golden examples.
+   Eval-flagged turns have tool_calls=[] since no LLM call ran.
 """
 
 import json

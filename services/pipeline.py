@@ -34,19 +34,32 @@ def handle_text(
     transport: str = "unknown",
 ) -> dict:
     """
-    1. Check for the eval-flag prefix (3+ threes). If present, strip it
-       and mark this turn as an eval candidate in the log.
-    2. Forward the cleaned message to the LLM tool loop (respond_to_text).
-       The LLM selects the right tool — file_text, edit_entries,
+    1. Check for the eval-flag prefix (3+ threes). If present, treat
+       this turn as a pure feedback note: log it, ack, and return
+       early. The LLM is never called and the turn is signalled
+       type='eval' so transports can skip pushing it into conversation
+       history (otherwise the next LLM turn would see the eval note).
+    2. Otherwise forward to the LLM tool loop (respond_to_text). The
+       LLM selects the right tool — file_text, file_system_note,
        list_entries, read_entries, or queue_job — based on intent.
     3. queue_job exits the loop early with a marker string; execute
        the job side-effect here and return a job reply.
     4. Log the full turn — input, llm_message, tool calls, reply.
-    5A. Return dict with keys: message (str), type ('chat' | 'job').
+    5A. Return dict with keys: message (str), type ('chat' | 'job' |
+        'eval').
     5B. Job replies also carry a job key with the raw job args.
     """
     flagged, clean_message = detect_flag(message)
     print(f"[pipeline/text] flagged={flagged} message={clean_message[:80]!r}")
+
+    if flagged:
+        ack = "flagged for eval"
+        log_turn(
+            transport=transport, input_type="text",
+            input_text=message, llm_message=clean_message,
+            reply=ack, tool_calls=[], eval_candidate=True,
+        )
+        return {"message": ack, "type": "eval"}
 
     raw, tool_calls = respond_to_text(clean_message, history)
 
@@ -57,14 +70,14 @@ def handle_text(
         log_turn(
             transport=transport, input_type="text",
             input_text=message, llm_message=clean_message,
-            reply=reply, tool_calls=tool_calls, eval_candidate=flagged,
+            reply=reply, tool_calls=tool_calls, eval_candidate=False,
         )
         return {"message": reply, "type": "job", "job": job_args}
 
     log_turn(
         transport=transport, input_type="text",
         input_text=message, llm_message=clean_message,
-        reply=raw, tool_calls=tool_calls, eval_candidate=flagged,
+        reply=raw, tool_calls=tool_calls, eval_candidate=False,
     )
     return {"message": raw, "type": "chat"}
 
