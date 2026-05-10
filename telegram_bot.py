@@ -35,10 +35,8 @@ from services import pipeline
 from services import users as _users
 from services import conversation_store as _cs
 
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    level=logging.INFO,
-)
+from services.logsetup import configure as _configure_logs
+_configure_logs()
 log = logging.getLogger("lila.telegram")
 
 # ── Auth ─────────────────────────────────────────────────────────────────────

@@ -31,6 +31,9 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+from services.logsetup import configure as _configure_logs
+_configure_logs()
+
 from services import archive, auth, conversation_store, pipeline, users
 from services.archive import (
     current_entry,
