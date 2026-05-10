@@ -47,12 +47,12 @@ song/project:  hospital, monastery, brutalist-ep (when known)
 ```
 
 A "project view" is a filtered query built on demand, not a folder. Every
-mutation — rename, retag, move, delete — is appended to `events.jsonl`; no
-record is ever destructively overwritten.
+mutation — rename, retag, move, delete — appends a row to the Postgres
+`events` table; no record is ever destructively overwritten.
 
 This supports a capture workflow where entries are filed tentatively
-(`possible-monastery`, `random-poetry`) and later consolidated under a
-stable song tag via the `retag_entries` tool once the identity is clear.
+(`possible-monastery`, `random-poetry`) and later corrected via
+`file_system_note` once the identity is clear.
 
 ### Retrieval
 
@@ -78,7 +78,7 @@ accesses the archive through a small tool surface:
 | `list_entries(tag?, limit?)` | Metadata for recent entries |
 | `read_entries(tag?, limit?)` | Metadata + full text / transcript / NOTE data |
 | `file_text(text, slug, tags)` | File a new lyric / note / fragment |
-| `retag_entries(file_ids, add?, remove?, replace?)` | Batch retag consolidation |
+| `file_system_note(file_id, note)` | Files an append-only correction tagged `system-note`; a healing agent reconciles later. |
 | `queue_job(job_type, ...)` | Side-effect jobs that create new files |
 
 `respond_to_text` runs a multi-turn tool loop (capped at four rounds). The
@@ -105,39 +105,42 @@ static/
   angel.svg             sidebar art
 soul.md                 system prompt — the living style guide
 improvements.md         feedback backlog, folded into soul.md over time
-archive/                (gitignored)
-  raw/{id}.{ext}        immutable originals
-  sidecars/{id}.json    per-entry metadata
-  events.jsonl          append-only event log — source of truth
-  jobs/{job_id}.json    job records
+archive/<user_id>/raw/<file_id>.<ext>   # raw audio bytes per user
+                                        # (events, jobs, conversation
+                                        #  history, users live in
+                                        #  Postgres — see migrations/)
 ```
 
 ---
 
 ## Setup
 
+### Local development
+
 ```bash
 git clone https://github.com/botforge/lila.git
 cd lila
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env         # or create one — see below
-cp -r demo archive           # optional — load the sample archive
 ```
 
-The `demo/` folder is a frozen snapshot of a working archive (voice notes,
-lyric entries, MIDI derivations) included so that a fresh clone presents a
-populated feed. Copying it into `archive/` is optional; omit that step to
-start with an empty archive.
+Create a local Postgres database and run migrations:
 
-`.env`:
+```bash
+createdb lila_dev
+DATABASE_URL='postgresql://<you>@localhost:5432/lila_dev' python migrations/run.py
+```
+
+Create `.env`:
 
 ```
 OPENROUTER_API_KEY=sk-or-v1-...
 MODEL=anthropic/claude-haiku-4-5   # or any OpenRouter model
 ARCHIVE_PATH=./archive
+DATABASE_URL=postgresql://<you>@localhost:5432/lila_dev
+LILA_JWT_SECRET=<at-least-32-random-bytes>
 TELEGRAM_BOT_TOKEN=...              # optional, for the Telegram bot
-TELEGRAM_ALLOWED_USER_ID=12345      # optional, restrict the bot to you
+# Telegram chat→user pairing happens via the users.set-telegram CLI command (see deploy runbook)
 ```
 
 **Run the web UI + API:**
@@ -151,9 +154,13 @@ python main.py
 python telegram_bot.py
 ```
 
-Both processes share the same `archive/` directory and the same `services/`
+Both processes share the same Postgres database and the same `services/`
 layer, so entries captured via Telegram are visible in the web feed on
 refresh and vice versa.
+
+### Cloud deployment (Fly.io)
+
+For cloud deployment to Fly.io, see `docs/deploy-runbook.md`.
 
 ---
 

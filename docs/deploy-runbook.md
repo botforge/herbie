@@ -104,7 +104,7 @@ flyctl machine restart --app lila --process telegram
 
 ## 9. Rotate the seeded password
 
-Open the web UI's account page (or run `set-password`):
+Run `set-password`:
 
 ```bash
 flyctl ssh console --app lila

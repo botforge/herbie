@@ -126,7 +126,7 @@ async def me(user: dict = Depends(auth.get_current_user)):
 async def health():
     """
     1. Ping the DB with a trivial SELECT.
-    2. Return ok on success, 503 on any failure — Render and load
+    2. Return ok on success, 503 on any failure — Fly.io and load
        balancers can hit this to gate traffic.
     """
     try:
