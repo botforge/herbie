@@ -10,7 +10,6 @@ Usage:
 
 Required .env:
   TELEGRAM_BOT_TOKEN=...
-  TELEGRAM_ALLOWED_USER_ID=...   # your numeric Telegram user ID (optional but recommended)
 """
 
 import logging
@@ -33,6 +32,8 @@ load_dotenv()
 
 from services.archive import ensure_archive_root
 from services import pipeline
+from services import users as _users
+from services import conversation_store as _cs
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -42,29 +43,17 @@ log = logging.getLogger("lila.telegram")
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
-_ALLOWED_ID = os.getenv("TELEGRAM_ALLOWED_USER_ID", "").strip()
 
-
-def _is_allowed(update: Update) -> bool:
-    if not _ALLOWED_ID:
-        return True  # open if no allowlist configured
-    return str(update.effective_user.id) == _ALLOWED_ID
-
-
-# ── Per-user conversation history ────────────────────────────────────────────
-
-# { chat_id: [{"role": ..., "content": ...}] }
-_conversations: dict[int, list[dict]] = {}
-
-
-def _history(chat_id: int) -> list[dict]:
-    return _conversations.setdefault(chat_id, [])
-
-
-def _push(chat_id: int, role: str, content: str):
-    hist = _history(chat_id)
-    hist.append({"role": role, "content": content})
-    _conversations[chat_id] = hist[-20:]
+def _lookup_user(update: Update) -> dict | None:
+    """
+    1. Pull the chat_id from the incoming update.
+    2. Look up the linked user in Postgres. None means this Telegram
+       account hasn't been paired to a Lila account.
+    """
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return None
+    return _users.get_user_by_telegram(chat_id)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -162,31 +151,36 @@ def _split(text: str, limit: int) -> list[str]:
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    1. Pass every text message directly to the LLM tool loop — no
+    1. Look up the Postgres user linked to this Telegram chat. Reply
+       with a clear message and return early if none is found.
+    2. Pass every text message directly to the LLM tool loop — no
        pre-classification. The LLM decides whether to call file_text,
        file_system_note, list_entries, read_entries, or queue_job.
-    2. If the user is replying to a prior bot message, prepend that
+    3. If the user is replying to a prior bot message, prepend that
        original message as context so the LLM knows exactly which file
        is being referenced without needing to search.
-    3. queue_job exits the tool loop early with a marker string; handle
-       the side-effect here and push the job reply to history.
+    4. Persist both sides of the exchange to Postgres conversation
+       history via _cs, unless the turn was an eval flag (type='eval').
     """
-    if not _is_allowed(update):
+    user = _lookup_user(update)
+    if not user:
+        await update.message.reply_text(
+            "this Telegram account is not linked to a Lila user."
+        )
         return
 
     msg = update.message.text.strip()
-    chat_id = update.effective_chat.id
-    history = _history(chat_id)
+    history = _cs.recent(user["user_id"], limit=20)
 
     reply_context = _extract_reply_context(update)
     llm_msg = f"[replying to: {reply_context}]\n{msg}" if reply_context else msg
 
-    result = pipeline.handle_text(llm_msg, history, transport="telegram")
+    result = pipeline.handle_text(user["user_id"], llm_msg, history, transport="telegram")
 
     await _send(update, result["segments"])
     if result.get("type") != "eval":
-        _push(chat_id, "user", llm_msg)
-        _push(chat_id, "assistant", result["message"])
+        _cs.append(user["user_id"], "user",      llm_msg)
+        _cs.append(user["user_id"], "assistant", result["message"])
 
 
 # ── Thinking indicator ────────────────────────────────────────────────────────
@@ -200,8 +194,17 @@ async def _thinking_indicator(update: Update) -> None:
 # ── Voice / audio handler ─────────────────────────────────────────────────────
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles voice messages (OGG/Opus from Telegram mic)."""
-    if not _is_allowed(update):
+    """
+    1. Look up the Postgres user linked to this Telegram chat. Reply with
+       a clear message and return early if none is found.
+    2. Download the OGG/Opus voice note to a temp file, then forward to
+       _ingest_audio for transcription and pipeline processing.
+    """
+    user = _lookup_user(update)
+    if not user:
+        await update.message.reply_text(
+            "this Telegram account is not linked to a Lila user."
+        )
         return
 
     voice = update.message.voice
@@ -211,12 +214,21 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(tmp.name)
         tmp_path = tmp.name
 
-    await _ingest_audio(update, context, tmp_path, ext="ogg")
+    await _ingest_audio(update, context, user, tmp_path, ext="ogg")
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles audio files sent as documents or audio attachments."""
-    if not _is_allowed(update):
+    """
+    1. Look up the Postgres user linked to this Telegram chat. Reply with
+       a clear message and return early if none is found.
+    2. Download the audio file (sent as document or audio attachment) to a
+       temp file, then forward to _ingest_audio for pipeline processing.
+    """
+    user = _lookup_user(update)
+    if not user:
+        await update.message.reply_text(
+            "this Telegram account is not linked to a Lila user."
+        )
         return
 
     audio = update.message.audio or update.message.document
@@ -228,34 +240,40 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(tmp.name)
         tmp_path = tmp.name
 
-    await _ingest_audio(update, context, tmp_path, ext=ext)
+    await _ingest_audio(update, context, user, tmp_path, ext=ext)
 
 
 async def _ingest_audio(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
+    user: dict,
     tmp_path: str,
     ext: str,
 ):
     """
     1. Forward tmp_path + any user caption to pipeline.handle_audio,
        which transcribes, names, and ingests the file in one call.
-    2. Send the filing confirmation reply and push both sides of the
-       exchange into this chat's conversation history.
+       The call is scoped to user["user_id"] so archive and log rows
+       stay isolated to the right user partition.
+    2. Send the filing confirmation reply and persist both sides of the
+       exchange to Postgres conversation history via _cs.
     3. Always delete the tmp file on exit, even if the pipeline raised.
     """
-    chat_id = update.effective_chat.id
-    history = _history(chat_id)
+    user_id = user["user_id"]
+    history = _cs.recent(user_id, limit=20)
 
     await _thinking_indicator(update)
 
     try:
-        user_context = update.message.caption or ""
-        result = pipeline.handle_audio(tmp_path, ext, user_context, history, transport="telegram")
+        caption = update.message.caption or ""
+        result = pipeline.handle_audio(
+            user_id, tmp_path, ext, user_context=caption,
+            history=history, transport="telegram",
+        )
 
         await _send(update, result["segments"])
-        _push(chat_id, "user", user_context or result.get("transcript") or "(voice note)")
-        _push(chat_id, "assistant", result["message"])
+        _cs.append(user_id, "user",      caption or result.get("transcript") or "(voice note)")
+        _cs.append(user_id, "assistant", result["message"])
 
     except Exception as e:
         log.exception("audio ingest failed")
@@ -278,7 +296,11 @@ async def handle_improvements(update: Update, context: ContextTypes.DEFAULT_TYPE
     Appends the idea to improvements.md with a timestamp.
     Does not touch any code or affect the running bot.
     """
-    if not _is_allowed(update):
+    user = _lookup_user(update)
+    if not user:
+        await update.message.reply_text(
+            "this Telegram account is not linked to a Lila user."
+        )
         return
 
     text = " ".join(context.args).strip() if context.args else ""
