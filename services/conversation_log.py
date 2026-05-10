@@ -2,9 +2,9 @@
 Append-only conversation log for eval set construction.
 
 1. Every turn — text or audio, from any transport — is written as one
-   JSON line to logs/conversations.jsonl. Fields: turn_id, ts,
+   JSON line to logs/conversations.jsonl. Fields: turn_id, user_id, ts,
    transport, input_type, input, transcript, llm_message, tool_calls,
-   reply, eval_candidate.
+   reply, eval_candidate. Every row is scoped to the user who sent it.
 2. Text messages prefixed with 3+ threes (e.g. "3333333 should have
    filed this differently") are intercepted by the pipeline as pure
    feedback notes: the LLM is NOT called, conversation history is NOT
@@ -43,6 +43,7 @@ def detect_flag(text: str) -> tuple[bool, str]:
 
 def log_turn(
     *,
+    user_id: str,
     transport: str,
     input_type: str,
     input_text: str,
@@ -54,20 +55,22 @@ def log_turn(
 ) -> None:
     """
     1. Ensure the logs/ directory exists.
-    2. Build the entry dict with a short UUID turn_id and ISO timestamp.
+    2. Build the entry dict with a short UUID turn_id, the calling user's
+       user_id, and an ISO timestamp — every row is scoped to a user.
     3. Append as a single JSON line — never overwrites, always grows.
     """
     _LOG_PATH.parent.mkdir(exist_ok=True)
     entry = {
-        "turn_id":       str(uuid.uuid4())[:8],
-        "ts":            datetime.now().isoformat(),
-        "transport":     transport,
-        "input_type":    input_type,
-        "input":         input_text,
-        "transcript":    transcript,
-        "llm_message":   llm_message,
-        "tool_calls":    tool_calls or [],
-        "reply":         reply,
+        "turn_id":        str(uuid.uuid4())[:8],
+        "user_id":        user_id,
+        "ts":             datetime.now().isoformat(),
+        "transport":      transport,
+        "input_type":     input_type,
+        "input":          input_text,
+        "transcript":     transcript,
+        "llm_message":    llm_message,
+        "tool_calls":     tool_calls or [],
+        "reply":          reply,
         "eval_candidate": eval_candidate,
     }
     with _LOG_PATH.open("a") as f:
