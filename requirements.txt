@@ -10,3 +10,7 @@ soundfile
 python-multipart
 aiofiles
 # silero-vad and torch removed — VAD only needed when librosa re-integrates (v2)
+psycopg[binary,pool]
+argon2-cffi
+pyjwt
+python-json-logger
