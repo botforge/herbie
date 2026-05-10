@@ -11,7 +11,9 @@ All jobs run synchronously (fast stubs, no real DSP).
 
 Every public function (handle_job, execute_job) and every private DSP
 helper takes user_id as the first parameter and forwards it into every
-archive call.
+archive call. Audio source paths are resolved via _raw_dir(user_id)
+so they land under <volume>/<user_id>/raw/<file_id>.<ext> — never
+the legacy VOLUME_ROOT flat layout.
 """
 
 import functools
@@ -19,7 +21,7 @@ import random
 from pathlib import Path
 
 from services.archive import (
-    RAW_DIR,
+    _raw_dir,
     complete_job,
     current_entry,
     ingest_audio,
@@ -227,7 +229,7 @@ _STEM_NAMES = ["vocals", "bass", "drums", "other"]
 def _stem_split_for(user_id: str, sc: dict) -> list[dict]:
     """Return 4 audio entries — stubbed stems that reuse the original audio."""
     ext      = sc.get("ext", "ogg")
-    src_path = RAW_DIR / f"{sc['id']}.{ext}"
+    src_path = _raw_dir(user_id) / f"{sc['id']}.{ext}"
     parent_tags = list(sc.get("tags", []))
     parent_slug = sc.get("slug", "audio")
     events = []
@@ -245,7 +247,7 @@ def _stem_split_for(user_id: str, sc: dict) -> list[dict]:
 def _copy_audio_with_tag(user_id: str, sc: dict, extra_tag: str, slug_suffix: str | None = None) -> dict:
     """Return one audio entry — a stubbed copy with an added tag."""
     ext         = sc.get("ext", "ogg")
-    src_path    = RAW_DIR / f"{sc['id']}.{ext}"
+    src_path    = _raw_dir(user_id) / f"{sc['id']}.{ext}"
     parent_tags = list(sc.get("tags", []))
     parent_slug = sc.get("slug", "audio")
     slug        = f"{parent_slug}-{slug_suffix or extra_tag}"

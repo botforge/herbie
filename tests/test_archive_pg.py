@@ -21,6 +21,9 @@ How to read this file:
  11. stage_audio copies bytes without inserting an event; commit_audio
      inserts the event afterwards so current_entry finds the entry.
  12. get_slug_version counts how many audio/text events share a slug.
+ 13. test_stem_split_finds_input_in_per_user_path verifies that
+     handle_job(stem_split) resolves the source from _raw_dir(user_id)
+     rather than the legacy VOLUME_ROOT flat path.
 """
 
 from pathlib import Path
@@ -189,3 +192,48 @@ def test_slug_version_counts_per_user(db, seed_user, fake_audio, temp_volume):
     archive.ingest_audio(uid, str(fake_audio), "loop", ["x"], "ogg", "")
     archive.ingest_audio(uid, str(fake_audio), "loop", ["x"], "ogg", "")
     assert archive.get_slug_version(uid, "loop") == 2
+
+
+def test_stem_split_finds_input_in_per_user_path(
+    db, seed_user, fake_audio, temp_volume,
+):
+    """
+    1. Stage and commit an audio file for the user so current_entry
+       can find it and its raw bytes live under the per-user path.
+    2. Run handle_job with job_type=stem_split — the handler must
+       resolve the source from _raw_dir(user_id)/<fid>.ogg, i.e.
+       <volume>/<user_id>/raw/<fid>.ogg, not the legacy VOLUME_ROOT
+       flat path. A FileNotFoundError here means the dead RAW_DIR
+       constant was still in use.
+    3. The reply must not contain "error" — four stem audio entries
+       (vocals/bass/drums/other) must have been written under the
+       per-user raw/ directory.
+    """
+    from services.jobs import handle_job
+
+    # 1. Ingest a vocal audio file for the user.
+    uid = seed_user("dhruv")
+    ev = archive.ingest_audio(
+        uid, str(fake_audio), "vocal-sketch", ["vocal"], "ogg", "",
+    )
+
+    # 2. Run stem_split via the public handle_job dispatcher.
+    reply = handle_job(uid, {"job_type": "stem_split", "file_id": ev["file_id"]})
+
+    # 3A. The reply must not signal a failure.
+    assert "error" not in reply.lower(), f"stem_split errored: {reply}"
+
+    # 3B. All four stem files must exist under the per-user raw/ directory.
+    #     Raw files are named <file_id>.ogg — slugs live in the DB, not in
+    #     the filename — so we count .ogg files: 1 original + 4 stems = 5.
+    raw = temp_volume / uid / "raw"
+    ogg_files = list(raw.glob("*.ogg"))
+    assert len(ogg_files) >= 5, (
+        f"expected at least 5 .ogg files (1 original + 4 stems) under {raw}; "
+        f"found {len(ogg_files)}: {ogg_files}"
+    )
+    # Also confirm the feed contains 4 new audio entries with stem tags.
+    feed = archive.get_feed(uid, tag="stem")
+    assert len(feed) == 4, (
+        f"expected 4 stem entries in feed; got {len(feed)}: {[e['slug'] for e in feed]}"
+    )
