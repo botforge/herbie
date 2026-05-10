@@ -2,13 +2,13 @@
 LLM layer: OpenRouter calls via the openai SDK.
 
 Public surface:
-  respond_to_text(message, history, extra_tools?, extra_handlers?)
+  respond_to_text(user_id, message, history, extra_tools?, extra_handlers?)
       → tuple[str, list[dict]]   used by the chat / Telegram pipeline
   respond_to_audio(transcript, user_context, history, ...)
-      → dict                     legacy CLI-only filing path
+      → dict                     legacy CLI-only filing path (no archive writes)
   format_filing_confirmation(slug, ext, version, tags, transcript)
       → str                      shared filing-reply formatter
-  summarize_tag(tag) → str       healing/summary path
+  summarize_tag(user_id, tag) → str       healing/summary path
 
 The chat tool surface is APPEND-ONLY: file_text, file_system_note,
 queue_job, list_entries, read_entries, plus per-turn extra tools
@@ -399,6 +399,7 @@ _MAX_TOOL_ROUNDS = 4
 
 
 def respond_to_text(
+    user_id: str,
     message: str,
     conversation_history: list[dict],
     extra_tools: list[dict] | None = None,
@@ -411,13 +412,15 @@ def respond_to_text(
     2. Offer the standard tool set, prepended with any extra_tools
        the caller supplies (e.g. file_audio for voice-note turns).
     3A. queue_job → exits early with a marker string; caller executes
-        the side-effect job.
+        the side-effect job. user_id is NOT serialized into the marker —
+        the caller (pipeline.handle_text) already has it locally and
+        passes it into handle_job directly.
     3B. Any extra_handlers are dispatched by name before the built-in
         handlers so the caller can inject turn-scoped tools.
     3C. All other tools (list_entries, read_entries, file_text,
-        file_system_note) are executed in-loop; result fed back to LLM.
-        Note: nothing in this loop mutates an existing entry —
-        corrections become append-only system_note events that a
+        file_system_note) are executed in-loop with user_id forwarded;
+        result fed back to LLM. Nothing in this loop mutates an existing
+        entry — corrections become append-only system_note events that a
         downstream healing agent reconciles later.
     4. Return (reply_str, tool_call_log) where tool_call_log is a list
        of {name, args, result} dicts — one per tool call across all
@@ -481,13 +484,13 @@ def respond_to_text(
                 if extra_handlers and name in extra_handlers:
                     result = extra_handlers[name](args)
                 elif name == "list_entries":
-                    result = _tool_list_entries(args)
+                    result = _tool_list_entries(user_id, args)
                 elif name == "read_entries":
-                    result = _tool_read_entries(args)
+                    result = _tool_read_entries(user_id, args)
                 elif name == "file_text":
-                    result = _tool_file_text(args)
+                    result = _tool_file_text(user_id, args)
                 elif name == "file_system_note":
-                    result = _tool_file_system_note(args)
+                    result = _tool_file_system_note(user_id, args)
                 else:
                     result = f"unknown tool: {name}"
 
@@ -509,13 +512,13 @@ def respond_to_text(
 # Tool implementations  (return strings to be fed back to the LLM)
 # ---------------------------------------------------------------------------
 
-def _tool_list_entries(args: dict) -> str:
+def _tool_list_entries(user_id: str, args: dict) -> str:
     from services.archive import get_feed
     limit = int(args.get("limit") or 15)
     tag   = (args.get("tag") or "").strip()
-    print(f"[LILA/llm/list_entries] tag={tag!r} limit={limit}")
+    print(f"[LILA/llm/list_entries] user={user_id} tag={tag!r} limit={limit}")
 
-    events = get_feed(tag=tag, limit=max(limit * 3, 40))
+    events = get_feed(user_id, tag=tag, limit=max(limit * 3, 40))
     files  = [e for e in events if e.get("type") in ("audio", "text", "lyric")][:limit]
 
     if not files:
@@ -526,26 +529,25 @@ def _tool_list_entries(args: dict) -> str:
         fid  = (e.get("file_id") or "")[:8]
         slug = e.get("slug", "—")
         tags = ", ".join(e.get("tags", []))
-        when = e.get("created_at", "")[:16].replace("T", " ")
+        when = str(e.get("created_at", ""))[:16].replace("T", " ")
         kind = e.get("type", "?")
         lines.append(f"  {fid}  {slug}  ({kind})  [{tags}]  {when}")
     return "\n".join(lines)
 
 
-def _tool_file_text(args: dict) -> str:
+def _tool_file_text(user_id: str, args: dict) -> str:
     from services.archive import ingest_text
     text = (args.get("text") or "").strip()
     slug = (args.get("slug") or "untitled").strip()
     tags = args.get("tags") or []
-    print(f"[LILA/llm/file_text] slug={slug!r} tags={tags} text_len={len(text)}")
     if not text:
         return "error: no text supplied"
-    ev = ingest_text(slug, tags, text)
+    ev  = ingest_text(user_id, slug, tags, text)
     fid = (ev.get("file_id") or "")[:8]
     return f"filed. file_id={fid} slug={ev.get('slug')} tags={ev.get('tags')}"
 
 
-def _tool_file_system_note(args: dict) -> str:
+def _tool_file_system_note(user_id: str, args: dict) -> str:
     """
     1. Pull the correction content and the optional target_file_id.
     2. If a target is supplied, inherit its current tag set so the
@@ -568,58 +570,50 @@ def _tool_file_system_note(args: dict) -> str:
     target = (args.get("target_file_id") or "").strip()
     inherited: list[str] = []
     if target:
-        inherited = list(current_entry(target).get("tags", []))
+        inherited = list(current_entry(user_id, target).get("tags", []))
     tags = inherited + (["system-note"] if "system-note" not in inherited else [])
 
     slug = f"system-note-{target[:8]}" if target else f"system-note-{_timestamp()}"
     body = f"[target: {target[:8]}] {content}" if target else content
 
-    ev = ingest_text(slug, tags, body)
-    fid = (ev.get("file_id") or "")[:8]
+    ev   = ingest_text(user_id, slug, tags, body)
+    fid  = (ev.get("file_id") or "")[:8]
     return f"noted. file_id={fid} target={target[:8] if target else 'none'} tags={tags}"
 
 
-def _tool_read_entries(args: dict) -> str:
+def _tool_read_entries(user_id: str, args: dict) -> str:
     from services.archive import get_feed
     limit = int(args.get("limit") or 30)
     tag   = (args.get("tag") or "").strip()
-    print(f"[LILA/llm/read_entries] tag={tag!r} limit={limit}")
 
-    events = get_feed(tag=tag, limit=max(limit * 2, 60))
-    fragments = []
+    events = get_feed(user_id, tag=tag, limit=max(limit * 2, 60))
+    fragments: list[str] = []
     for e in events:
         if e.get("type") not in ("audio", "text", "lyric"):
             continue
         text  = (e.get("text") or "").strip()
         trans = (e.get("transcript") or "").strip()
         midi  = (e.get("midi_notes") or "").strip()
-
-        body = text or trans
+        body  = text or trans
         if not body and not midi:
             continue
-
         fid  = (e.get("file_id") or "")[:8]
         slug = e.get("slug", "")
         tags = ", ".join(e.get("tags", []))
-        when = e.get("created_at", "")[:16].replace("T", " ")
+        when = str(e.get("created_at", ""))[:16].replace("T", " ")
         kind = "lyric/text" if e.get("type") in ("text", "lyric") else "voice-note"
         if midi:
             kind = "midi"
-
         parts = [f"[{when}]  {fid}  {slug}  ({kind})  [{tags}]"]
         if body:
             parts.append(body)
         if midi:
             parts.append(f"NOTE data (pitch start_sec dur_sec):\n{midi}")
-
         fragments.append("\n".join(parts))
         if len(fragments) >= limit:
             break
-
     if not fragments:
         return f"no readable entries tagged {tag}" if tag else "no readable entries"
-
-    print(f"[LILA/llm/read_entries] returning {len(fragments)} fragments")
     return "\n\n---\n\n".join(reversed(fragments))
 
 
@@ -629,14 +623,14 @@ def _tool_read_entries(args: dict) -> str:
 # Lyric summarization
 # ---------------------------------------------------------------------------
 
-def summarize_tag(tag: str) -> str:
+def summarize_tag(user_id: str, tag: str) -> str:
     """
     Read all text/lyric events AND audio transcripts for a tag, ask the LLM
     to distil the latest version of the lyrics. Returns plain text.
     """
     from services.archive import get_feed
-    events = list(reversed(get_feed(tag=tag, limit=500)))
-    print(f"[LILA/llm/summarize] tag={tag!r} got {len(events)} events total")
+    events = list(reversed(get_feed(user_id, tag=tag, limit=500)))
+    print(f"[LILA/llm/summarize] user={user_id} tag={tag!r} got {len(events)} events total")
 
     fragments = []
     for e in events:

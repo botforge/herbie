@@ -2,12 +2,16 @@
 Job execution — stub implementations.
 All jobs run synchronously (fast stubs, no real DSP).
 
-  rhythm_to_midi  → random NOTE grid text entry + "midi" tag
-  stem_split      → 4 copies of original audio (vocal/bass/drums/other)
-  autotune        → original audio re-filed with "tuned" tag
-  transpose       → original audio re-filed with "transposed" tag
-  render_chords   → random chord MIDI text entry
-  summarize       → LLM distillation of all text/lyric entries for a tag
+  to_midi       → random NOTE grid text entry + "midi" tag
+  stem_split    → 4 copies of original audio (vocal/bass/drums/other)
+  autotune      → original audio re-filed with "tuned" tag
+  transpose     → original audio re-filed with "transposed" tag
+  render_chords → chord-symbol MIDI text entry
+  summarize     → LLM distillation of all text/lyric entries for a tag
+
+Every public function (handle_job, execute_job) and every private DSP
+helper takes user_id as the first parameter and forwards it into every
+archive call.
 """
 
 import functools
@@ -58,23 +62,32 @@ def stub_job_response(args: dict) -> str:
     return stubs.get(jt, f"(stub) unknown job {jt}")
 
 
-def handle_job(args: dict) -> str:
+def handle_job(user_id: str, args: dict) -> str:
     """
-    Real execution for jobs where it's implemented; stubs otherwise.
-    Returns the user-facing reply string.
+    Inline job dispatch — runs the side-effect synchronously and
+    returns the user-facing reply string. The chat path uses this;
+    the web POST /jobs path uses execute_job directly via
+    BackgroundTasks.
+
+    1. Decide which handler to run from job_type.
+    2. Resolve the input entry by current_entry(user_id, file_id)
+       — every handler needs the parent's tags / slug to derive the
+       output slug.
+    3. Dispatch to a typed helper; helpers run real DSP where it
+       exists (render_chords) and stubs elsewhere.
     """
     jt = args.get("job_type", "?")
-    print(f"[LILA/jobs] handle_job: {args}")
+    print(f"[LILA/jobs] handle_job: user={user_id} args={args}")
 
     if jt == "to_midi":
         fid = (args.get("file_id") or "").strip()
         if not fid:
             return "which file? give me a file_id from the archive."
-        sc = current_entry(fid)
+        sc = current_entry(user_id, fid)
         print(f"[LILA/jobs] to_midi: sidecar for {fid}: {bool(sc)}")
         if not sc:
             return f"file {fid} not found."
-        ev = _generate_midi_for(sc)
+        ev = _generate_midi_for(user_id, sc)
         parent_slug = sc.get("slug", fid)
         print(f"[LILA/jobs] to_midi: filed {ev['slug']} (parent {parent_slug})")
         return f"filed {ev['slug']} — midi grid derived from {parent_slug}."
@@ -89,7 +102,7 @@ def handle_job(args: dict) -> str:
         if not chords:
             return "which chords? give me a progression like Em - Am - D - G."
         tag = (args.get("tag") or "").strip()
-        ev  = _render_chord_progression(chords, tag=tag)
+        ev  = _render_chord_progression(user_id, chords, tag=tag)
         return f"filed {ev['slug']} — {' - '.join(chords)} rendered as midi grid."
 
     # All remaining audio jobs need a file_id and a sidecar
@@ -97,25 +110,25 @@ def handle_job(args: dict) -> str:
         fid = (args.get("file_id") or "").strip()
         if not fid:
             return "which file? give me a file_id from the archive."
-        sc = current_entry(fid)
+        sc = current_entry(user_id, fid)
         if not sc:
             return f"file {fid} not found."
         parent_slug = sc.get("slug", fid)
 
         if jt == "stem_split":
-            evs = _stem_split_for(sc)
+            evs = _stem_split_for(user_id, sc)
             slugs = ", ".join(e["slug"] for e in evs)
             return f"filed {len(evs)} stems from {parent_slug}: {slugs}"
 
         if jt == "autotune":
-            ev = _copy_audio_with_tag(sc, extra_tag="tuned")
+            ev = _copy_audio_with_tag(user_id, sc, extra_tag="tuned")
             return f"filed {ev['slug']} — autotuned copy of {parent_slug}."
 
         if jt == "transpose":
             semi = int(args.get("semitones") or 0)
             label = f"up{semi}" if semi > 0 else (f"down{abs(semi)}" if semi < 0 else "same")
             ev = _copy_audio_with_tag(
-                sc, extra_tag=f"transposed-{label}",
+                user_id, sc, extra_tag=f"transposed-{label}",
                 slug_suffix=f"transposed-{label}",
             )
             return f"filed {ev['slug']} — transposed {label} from {parent_slug}."
@@ -127,11 +140,17 @@ def handle_job(args: dict) -> str:
 # Dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
-def execute_job(job: dict) -> None:
-    jtype = job.get("job_type") or job.get("type", "")
+def execute_job(user_id: str, job: dict) -> None:
+    """
+    1. Resolve the input entry for this user.
+    2. Dispatch to the typed handler.
+    3. Mark the job done with complete_job once the handler returns.
+    """
+    jtype = job.get("type") or job.get("job_type", "")
     fid   = job.get("input_file_id", "")
-    sc    = current_entry(fid)
+    sc    = current_entry(user_id, fid)
     if not sc and jtype != "summarize":
+        complete_job(user_id, job["job_id"], output_text="(input not found)")
         return
 
     handlers = {
@@ -143,12 +162,16 @@ def execute_job(job: dict) -> None:
         "summarize":      _summarize,
     }
     fn = handlers.get(jtype)
-    if fn:
-        try:
-            fn(job, sc)
-        except Exception as e:
-            import logging
-            logging.getLogger("lila").error(f"job {jtype} failed: {e}")
+    if not fn:
+        complete_job(user_id, job["job_id"], output_text=f"unknown job_type: {jtype}")
+        return
+    try:
+        out_id = fn(user_id, job, sc)
+        complete_job(user_id, job["job_id"], output_file_id=out_id)
+    except Exception as e:
+        import logging
+        logging.getLogger("lila.jobs").exception("job failed")
+        complete_job(user_id, job["job_id"], output_text=f"error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,7 +197,7 @@ def _random_midi_notes(n: int = 24) -> str:
     return "\n".join(lines)
 
 
-def _generate_midi_for(sc: dict) -> dict:
+def _generate_midi_for(user_id: str, sc: dict) -> dict:
     parent_tags = list(sc.get("tags", []))
     parent_slug = sc.get("slug", "audio")
     slug        = parent_slug + "-midi"
@@ -183,15 +206,15 @@ def _generate_midi_for(sc: dict) -> dict:
     note_lines  = [l for l in notes_text.splitlines() if l.startswith("NOTE")]
     description = f"midi derived from {parent_slug} — {len(note_lines)} notes"
     return ingest_text(
-        slug, tags, description,
+        user_id, slug, tags, description,
         parent_id=sc["id"],
         midi_notes=notes_text,
     )
 
 
-def _to_midi(job: dict, sc: dict) -> None:
-    ev = _generate_midi_for(sc)
-    complete_job(job["job_id"], output_file_id=ev["file_id"])
+def _to_midi(user_id: str, job: dict, sc: dict) -> str | None:
+    ev = _generate_midi_for(user_id, sc)
+    return ev["file_id"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,7 +224,7 @@ def _to_midi(job: dict, sc: dict) -> None:
 _STEM_NAMES = ["vocals", "bass", "drums", "other"]
 
 
-def _stem_split_for(sc: dict) -> list[dict]:
+def _stem_split_for(user_id: str, sc: dict) -> list[dict]:
     """Return 4 audio entries — stubbed stems that reuse the original audio."""
     ext      = sc.get("ext", "ogg")
     src_path = RAW_DIR / f"{sc['id']}.{ext}"
@@ -212,14 +235,14 @@ def _stem_split_for(sc: dict) -> list[dict]:
         slug = f"{parent_slug}-{stem}"
         tags = parent_tags + [t for t in ["stem", stem] if t not in parent_tags]
         ev = ingest_audio(
-            str(src_path), slug, tags, ext,
+            user_id, str(src_path), slug, tags, ext,
             sc.get("transcript", ""), parent_id=sc["id"],
         )
         events.append(ev)
     return events
 
 
-def _copy_audio_with_tag(sc: dict, extra_tag: str, slug_suffix: str | None = None) -> dict:
+def _copy_audio_with_tag(user_id: str, sc: dict, extra_tag: str, slug_suffix: str | None = None) -> dict:
     """Return one audio entry — a stubbed copy with an added tag."""
     ext         = sc.get("ext", "ogg")
     src_path    = RAW_DIR / f"{sc['id']}.{ext}"
@@ -228,26 +251,26 @@ def _copy_audio_with_tag(sc: dict, extra_tag: str, slug_suffix: str | None = Non
     slug        = f"{parent_slug}-{slug_suffix or extra_tag}"
     tags        = parent_tags + [t for t in [extra_tag] if t not in parent_tags]
     return ingest_audio(
-        str(src_path), slug, tags, ext,
+        user_id, str(src_path), slug, tags, ext,
         sc.get("transcript", ""), parent_id=sc["id"],
     )
 
 
-def _stem_split(job: dict, sc: dict) -> None:
-    evs = _stem_split_for(sc)
-    complete_job(job["job_id"], output_file_id=evs[-1]["file_id"] if evs else None)
+def _stem_split(user_id: str, job: dict, sc: dict) -> str | None:
+    evs = _stem_split_for(user_id, sc)
+    return evs[-1]["file_id"] if evs else None
 
 
-def _autotune(job: dict, sc: dict) -> None:
-    ev = _copy_audio_with_tag(sc, extra_tag="tuned")
-    complete_job(job["job_id"], output_file_id=ev["file_id"])
+def _autotune(user_id: str, job: dict, sc: dict) -> str | None:
+    ev = _copy_audio_with_tag(user_id, sc, extra_tag="tuned")
+    return ev["file_id"]
 
 
-def _transpose(job: dict, sc: dict) -> None:
+def _transpose(user_id: str, job: dict, sc: dict) -> str | None:
     semitones = job.get("params", {}).get("semitones", 0)
     label = f"up{semitones}" if semitones > 0 else f"down{abs(semitones)}"
-    ev = _copy_audio_with_tag(sc, extra_tag=f"transposed-{label}", slug_suffix=f"transposed-{label}")
-    complete_job(job["job_id"], output_file_id=ev["file_id"])
+    ev = _copy_audio_with_tag(user_id, sc, extra_tag=f"transposed-{label}", slug_suffix=f"transposed-{label}")
+    return ev["file_id"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,41 +453,41 @@ def _chords_to_midi_text(chords: list[str], beat_duration: float = 1.0) -> str:
     return "\n".join(lines)
 
 
-def _render_chord_progression(chords: list[str], tag: str = "") -> dict:
+def _render_chord_progression(user_id: str, chords: list[str], tag: str = "") -> dict:
     notes_text  = _chords_to_midi_text(chords)
     slug        = f"{tag}-chords" if tag else "chord-render"
     base_tags   = [tag] if tag else []
     tags        = base_tags + [t for t in ["midi", "chords"] if t not in base_tags]
     description = f"chord render: {' - '.join(chords)}"
-    return ingest_text(slug, tags, description, midi_notes=notes_text)
+    return ingest_text(user_id, slug, tags, description, midi_notes=notes_text)
 
 
 # Legacy handler kept for the /jobs endpoint path (random progression)
-def _render_chords(job: dict, sc: dict) -> None:
+def _render_chords(user_id: str, job: dict, sc: dict) -> str | None:
     chords = random.sample(
         [q for q, _ in _QUALITY_INTERVALS if q in ("m", "")][:2] +
         ["C", "Am", "F", "G", "Em", "Dm"], k=4
     )
     parent_tags = list(sc.get("tags", []))
     tag = parent_tags[0] if parent_tags else ""
-    ev = _render_chord_progression(chords, tag=tag)
-    complete_job(job["job_id"], output_file_id=ev["file_id"])
+    ev = _render_chord_progression(user_id, chords, tag=tag)
+    return ev["file_id"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # summarize
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _summarize(job: dict, sc: dict) -> None:
+def _summarize(user_id: str, job: dict, sc: dict) -> str | None:
     from services.llm import summarize_tag
     tag    = job.get("params", {}).get("tag") or ""
     if not tag and sc:
         tag = next((t for t in sc.get("tags", []) if t not in
                     {"audio","lyric","text","midi","stem","sketch"}), "")
-    result = summarize_tag(tag) if tag else "no tag specified for summarize job"
+    result = summarize_tag(user_id, tag) if tag else "no tag specified for summarize job"
     parent_tags = sc.get("tags", []) if sc else [tag]
     slug   = f"{tag}-summary"
     tags   = list(parent_tags) + [t for t in ["summary"] if t not in parent_tags]
-    ev     = ingest_text(slug, tags, result,
+    ev     = ingest_text(user_id, slug, tags, result,
                          parent_id=sc.get("id") if sc else None)
-    complete_job(job["job_id"], output_file_id=ev["file_id"])
+    return ev["file_id"]
