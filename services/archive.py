@@ -118,27 +118,136 @@ def ingest_text(
     return row
 
 
-# ── Forward stubs — reimplemented in Tasks 9–10 ──────────────────────────────
-# These names are imported at module level by services/render.py,
-# services/jobs.py, and services/pipeline.py. Defining them here as
-# NotImplementedError stubs keeps those modules importable (so pytest
-# can collect every test file) while ensuring any call to them fails
-# loudly — the intended red state for Tasks 9–10.
+# ── Jobs ─────────────────────────────────────────────────────────────────────
 
-def complete_job(*args, **kwargs):
-    raise NotImplementedError("archive.complete_job not yet reimplemented (Task 9)")
+def queue_job(user_id: str, job_type: str, input_file_id: str,
+              params: dict | None = None) -> dict:
+    """
+    1. Insert a job row in 'queued' state.
+    2. Append a job_queued event so the feed reflects it.
+    """
+    job_id = "job_" + _new_id()
+    params = params or {}
+    with _db.connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO jobs
+               (job_id, user_id, type, status, input_file_id, params)
+               VALUES (%s, %s, %s, 'queued', %s, %s)
+               RETURNING *""",
+            (job_id, user_id, job_type, input_file_id, json.dumps(params)),
+        )
+        job = cur.fetchone()
+        input_tags = []
+        ce = current_entry(user_id, input_file_id)
+        if ce:
+            input_tags = ce.get("tags", [])
+        conn.execute(
+            """INSERT INTO events
+               (event_id, user_id, type, tags, job_id)
+               VALUES (%s, %s, 'job_queued', %s, %s)""",
+            (_new_id(), user_id, input_tags, job_id),
+        )
+    return job
 
 
-def get_slug_version(*args, **kwargs):
-    raise NotImplementedError("archive.get_slug_version not yet reimplemented (Task 10)")
+def complete_job(user_id: str, job_id: str,
+                 output_file_id: str | None = None,
+                 output_text: str | None = None) -> None:
+    """
+    1. Mark the job row as 'done' and record output_file_id + completed_at.
+    2. Append a job_done event so the feed reflects completion.
+    """
+    with _db.connect() as conn:
+        conn.execute(
+            """UPDATE jobs
+               SET status = 'done', output_file_id = %s, completed_at = now()
+               WHERE user_id = %s AND job_id = %s""",
+            (output_file_id, user_id, job_id),
+        )
+        conn.execute(
+            """INSERT INTO events
+               (event_id, user_id, type, file_id, job_id, text)
+               VALUES (%s, %s, 'job_done', %s, %s, %s)""",
+            (_new_id(), user_id, output_file_id, job_id, output_text),
+        )
 
 
-def stage_audio(*args, **kwargs):
-    raise NotImplementedError("archive.stage_audio not yet reimplemented (Task 10)")
+def get_jobs(user_id: str, status: str | None = None) -> list[dict]:
+    """
+    1. If status is given, filter to that status; otherwise return all jobs.
+    2. Return newest-first.
+    """
+    if status:
+        rows = _db.fetch_all(
+            """SELECT * FROM jobs WHERE user_id = %s AND status = %s
+               ORDER BY created_at DESC""",
+            (user_id, status),
+        )
+    else:
+        rows = _db.fetch_all(
+            "SELECT * FROM jobs WHERE user_id = %s ORDER BY created_at DESC",
+            (user_id,),
+        )
+    return [dict(r) for r in rows]
 
 
-def commit_audio(*args, **kwargs):
-    raise NotImplementedError("archive.commit_audio not yet reimplemented (Task 10)")
+# ── Staging (audio that may or may not be committed) ─────────────────────────
+
+def stage_audio(user_id: str, src_path: str, ext: str) -> tuple[str, Path]:
+    """
+    1. Generate file_id and copy bytes to <volume>/<user>/raw/.
+    2. Do NOT insert an event yet — caller decides whether to keep
+       it (see commit_audio) based on the LLM's tool choice.
+    """
+    ensure_user_dirs(user_id)
+    file_id = _new_id()
+    ext = ext.lstrip(".")
+    out = _raw_dir(user_id) / f"{file_id}.{ext}"
+    shutil.copy2(str(src_path), str(out))
+    return file_id, out
+
+
+def commit_audio(user_id: str, file_id: str, slug: str, tags: list[str],
+                 ext: str, transcript: str = "") -> dict:
+    """
+    Insert the audio event for a previously-staged file. Pairs with
+    stage_audio — used by services/pipeline.py:handle_audio.
+
+    1. Strip any leading dot from ext so the stored value is bare (e.g. 'ogg').
+    2. INSERT one audio event row with the caller-supplied file_id
+       RETURNING * so the caller sees the canonical shape.
+    3. Alias id ← file_id for back-compat with legacy call sites.
+    """
+    ext = ext.lstrip(".")
+    with _db.connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO events
+               (event_id, user_id, type, file_id, slug, tags,
+                transcript, ext, parent_id, job_id)
+               VALUES (%s, %s, 'audio', %s, %s, %s, %s, %s, NULL, NULL)
+               RETURNING *""",
+            (_new_id(), user_id, file_id, slug, tags, transcript, ext),
+        )
+        row = cur.fetchone()
+    row["id"] = row["file_id"]
+    return row
+
+
+# ── Helper: how many entries already use this slug ──────────────────────────
+
+def get_slug_version(user_id: str, slug: str) -> int:
+    """
+    1. COUNT all audio/text events for this (user, slug) pair.
+    2. Return the integer count — callers use this as a version
+       suffix (e.g. slug-v2) to avoid duplicate slugs.
+    """
+    row = _db.fetch_one(
+        """SELECT COUNT(*) AS n FROM events
+           WHERE user_id = %s AND slug = %s
+             AND type IN ('audio','text')""",
+        (user_id, slug),
+    )
+    return int(row["n"]) if row else 0
 
 
 # ── Audio ingest ─────────────────────────────────────────────────────────────

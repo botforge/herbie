@@ -16,6 +16,11 @@ How to read this file:
   8. update_file_meta / update_files_meta mutate rows in place (web PATCH
      surface only) and snapshot prior state into last_action.
   9. undo_last_action restores the snapshot and clears the buffer.
+ 10. queue_job inserts a job row in 'queued' state and appends a job_queued
+     event; complete_job transitions it to 'done' and get_jobs returns it.
+ 11. stage_audio copies bytes without inserting an event; commit_audio
+     inserts the event afterwards so current_entry finds the entry.
+ 12. get_slug_version counts how many audio/text events share a slug.
 """
 
 from pathlib import Path
@@ -155,3 +160,32 @@ def test_update_meta_unknown_returns_false(db, seed_user, temp_volume):
     # 2. Expect False — no row was matched, so nothing was changed.
     uid = seed_user("dhruv")
     assert archive.update_file_meta(uid, "deadbeef", tags=["x"]) is False
+
+
+def test_queue_and_complete_job(db, seed_user, fake_audio, temp_volume):
+    uid = seed_user("dhruv")
+    ev = archive.ingest_audio(uid, str(fake_audio), "x", ["a"], "ogg", "")
+    job = archive.queue_job(uid, "to_midi", ev["file_id"], {"k": 1})
+    assert job["status"] == "queued"
+    archive.complete_job(uid, job["job_id"], output_file_id="abc12345")
+    rows = archive.get_jobs(uid, status="done")
+    assert any(j["job_id"] == job["job_id"] for j in rows)
+
+
+def test_stage_then_commit_audio(db, seed_user, fake_audio, temp_volume):
+    uid = seed_user("dhruv")
+    fid, path = archive.stage_audio(uid, str(fake_audio), "ogg")
+    assert path.exists()
+    assert archive.current_entry(uid, fid) == {}    # not committed yet
+
+    ev = archive.commit_audio(uid, fid, "voice-1", ["voice-note"], "ogg",
+                              transcript="hi")
+    assert ev["file_id"] == fid
+    assert archive.current_entry(uid, fid)["slug"] == "voice-1"
+
+
+def test_slug_version_counts_per_user(db, seed_user, fake_audio, temp_volume):
+    uid = seed_user("dhruv")
+    archive.ingest_audio(uid, str(fake_audio), "loop", ["x"], "ogg", "")
+    archive.ingest_audio(uid, str(fake_audio), "loop", ["x"], "ogg", "")
+    assert archive.get_slug_version(uid, "loop") == 2
