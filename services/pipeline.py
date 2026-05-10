@@ -42,16 +42,18 @@ from services.render import parse_reply
 print = functools.partial(print, flush=True)
 
 
-def _result(message: str, type_: str, **extra) -> dict:
+def _result(user_id: str, message: str, type_: str, **extra) -> dict:
     """
     Build the dict every transport receives. parse_reply runs on
     every reply, even deterministic ones (filing confirmations,
     eval acks, job replies) — for marker-less strings it returns a
     single text segment, so transports never special-case.
+    user_id is forwarded into parse_reply so archive lookups stay
+    scoped to the right user partition.
     """
     return {
         "message":  message,
-        "segments": parse_reply(message),
+        "segments": parse_reply(user_id, message),
         "type":     type_,
         **extra,
     }
@@ -91,7 +93,7 @@ def handle_text(
             input_text=message, llm_message=clean_message,
             reply=ack, tool_calls=[], eval_candidate=True,
         )
-        return _result(ack, "eval")
+        return _result(user_id, ack, "eval")
 
     raw, tool_calls = respond_to_text(user_id, clean_message, history)
 
@@ -104,14 +106,14 @@ def handle_text(
             input_text=message, llm_message=clean_message,
             reply=reply, tool_calls=tool_calls, eval_candidate=False,
         )
-        return _result(reply, "job", job=job_args)
+        return _result(user_id, reply, "job", job=job_args)
 
     log_turn(
         user_id=user_id, transport=transport, input_type="text",
         input_text=message, llm_message=clean_message,
         reply=raw, tool_calls=tool_calls, eval_candidate=False,
     )
-    return _result(raw, "chat")
+    return _result(user_id, raw, "chat")
 
 
 def handle_audio(
@@ -202,7 +204,7 @@ def handle_audio(
             reply=raw, tool_calls=tool_calls,
             transcript=transcript, eval_candidate=flagged,
         )
-        return _result(raw, "chat")
+        return _result(user_id, raw, "chat")
 
     ev = committed["event"]
     reply = committed["message"]
@@ -213,7 +215,7 @@ def handle_audio(
         transcript=transcript, eval_candidate=flagged,
     )
     return _result(
-        reply, "audio",
+        user_id, reply, "audio",
         file_id=file_id, slug=ev["slug"], tags=ev["tags"],
         transcript=clean_transcript,
     )

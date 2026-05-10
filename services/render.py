@@ -6,15 +6,14 @@ document, web JSON + frontend marker, CLI line + filename).
 
 The LLM may emit `[[audio:<file_id>]]` markers anywhere in a reply.
 parse_reply walks the string, resolves each marker against the
-archive, and returns segments in original order.
+archive (scoped to user_id), and returns segments in original order.
 """
 
 import re
 from pathlib import Path
 from typing import TypedDict
 
-from services import archive
-from services.archive import current_entry
+from services.archive import VOLUME_ROOT, current_entry
 
 _AUDIO_MARKER_RE = re.compile(r"\[\[audio:([a-fA-F0-9]{8})\]\]")
 
@@ -40,13 +39,14 @@ class AudioMissSegment(TypedDict):
 Segment = TextSegment | AudioSegment | AudioMissSegment
 
 
-def parse_reply(text: str) -> list[Segment]:
+def parse_reply(user_id: str, reply: str) -> list[Segment]:
     """
     1. Walk the reply string. Between every two adjacent
        [[audio:<8hex>]] markers, emit a text segment carrying the
        prose (whitespace preserved — the consumer decides whether
        to strip).
-    2. For each marker, resolve the file_id against the archive:
+    2. For each marker, resolve the file_id against the archive
+       (scoped to user_id):
        2A. If no live entry exists → emit an audio_miss segment with
            reason="no_entry" so the consumer can tell the user the
            reference is dead.
@@ -60,19 +60,19 @@ def parse_reply(text: str) -> list[Segment]:
     """
     segments: list[Segment] = []
     last = 0
-    for m in _AUDIO_MARKER_RE.finditer(text):
-        pre = text[last:m.start()]
+    for m in _AUDIO_MARKER_RE.finditer(reply):
+        pre = reply[last:m.start()]
         if pre:
             segments.append({"kind": "text", "text": pre})
 
         fid = m.group(1).lower()
-        sc  = current_entry(fid)
+        sc  = current_entry(user_id, fid)
         if not sc:
             segments.append({"kind": "audio_miss", "file_id": fid, "reason": "no_entry"})
         else:
             ext      = "." + (sc.get("ext") or "ogg").lstrip(".")
             slug     = sc.get("slug") or fid
-            path     = archive.RAW_DIR / f"{fid}{ext}"
+            path     = VOLUME_ROOT / user_id / "raw" / f"{fid}{ext}"
             filename = f"{slug}{ext}"
             if not path.exists():
                 segments.append({
@@ -89,7 +89,7 @@ def parse_reply(text: str) -> list[Segment]:
                 })
         last = m.end()
 
-    tail = text[last:]
+    tail = reply[last:]
     if tail:
         segments.append({"kind": "text", "text": tail})
 

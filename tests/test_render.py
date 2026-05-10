@@ -27,13 +27,13 @@ from services import archive, render
 
 def test_parse_reply_returns_single_text_segment_for_plain_string(temp_archive):
     """A reply with no markers passes through as one text segment."""
-    out = render.parse_reply("hello there")
+    out = render.parse_reply("any-user", "hello there")
     assert out == [{"kind": "text", "text": "hello there"}]
 
 
 def test_parse_reply_returns_empty_list_for_empty_input(temp_archive):
     """Empty string → no segments. Caller decides how to handle silence."""
-    assert render.parse_reply("") == []
+    assert render.parse_reply("any-user", "") == []
 
 
 # ── resolved marker ─────────────────────────────────────────────────────────
