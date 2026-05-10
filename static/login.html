@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Lila — Login</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <style>
+    body { font-family: ui-monospace, monospace; background: #0e0e0e;
+           color: #eee; display: grid; place-items: center; height: 100vh;
+           margin: 0; }
+    form { display: grid; gap: 0.5rem; min-width: 16rem; }
+    h2 { margin: 0 0 0.5rem 0; font-weight: 400; }
+    input, button { padding: 0.6rem; background: #1a1a1a; color: #eee;
+                    border: 1px solid #333; border-radius: 4px; font: inherit; }
+    button { cursor: pointer; }
+    button:hover { background: #222; }
+    .err { color: #f66; min-height: 1em; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <form id="f">
+    <h2>Lila</h2>
+    <input id="u" placeholder="username" autocomplete="username" required>
+    <input id="p" type="password" placeholder="password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+    <div id="err" class="err"></div>
+  </form>
+  <script>
+    document.getElementById("f").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const username = document.getElementById("u").value;
+      const password = document.getElementById("p").value;
+      const err = document.getElementById("err");
+      err.textContent = "";
+      const r = await fetch("/auth/login", {
+        method: "POST",
+        headers: {"content-type": "application/json"},
+        body: JSON.stringify({username, password}),
+        credentials: "same-origin",
+      });
+      if (r.ok) location.href = "/";
+      else err.textContent = "invalid credentials";
+    });
+  </script>
+</body>
+</html>

@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lila</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0e0e0e">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -650,6 +652,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 ::-webkit-scrollbar { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--line); }
+
+/* ── Voice memo record button ────────────────────────────────────────────── */
+#record-btn.recording { color: #f44; animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 </style>
 </head>
 <body>
@@ -730,6 +736,7 @@ body.resizing { cursor: col-resize; user-select: none; }
       <div id="chat-actions">
         <span id="upload-status"></span>
         <button class="btn" id="upload-btn">+ audio</button>
+        <button class="btn" id="record-btn" type="button" title="hold to record">●</button>
         <button class="btn primary" id="send-btn">send</button>
       </div>
     </div>
@@ -1615,6 +1622,63 @@ document.getElementById('search-input').addEventListener('input', e => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 loadFeed();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PWA: register service worker
+// ─────────────────────────────────────────────────────────────────────────────
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth: intercept every fetch — any 401 bounces the user to /login.html
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _origFetch = window.fetch;
+window.fetch = async (...args) => {
+  const r = await _origFetch(...args);
+  if (r.status === 401) location.href = "/login.html";
+  return r;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Voice memo: hold-to-record on #record-btn.
+//
+// 1. On pointerdown: acquire the microphone stream and start MediaRecorder.
+// 2. Collect audio chunks as they arrive.
+// 3. On pointerup: stop the recorder.
+//    3A. Assemble chunks into a Blob and POST to /ingest/audio.
+//    3B. On success, call loadFeed() to pull the new entry into the feed.
+//    3C. Release all mic tracks regardless of outcome.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function setupRecord() {
+  const btn = document.getElementById("record-btn");
+  if (!btn) return;
+  let recorder, chunks = [];
+  btn.addEventListener("pointerdown", async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    recorder = new MediaRecorder(stream);
+    chunks = [];
+    recorder.ondataavailable = e => chunks.push(e.data);
+    recorder.onstop = async () => {
+      const blob = new Blob(chunks, {type: "audio/webm"});
+      const fd   = new FormData();
+      fd.append("file", blob, "voice.webm");
+      const r = await fetch("/ingest/audio", {method: "POST", body: fd});
+      if (r.ok) loadFeed();
+      stream.getTracks().forEach(t => t.stop());
+    };
+    recorder.start();
+    btn.classList.add("recording");
+  });
+  btn.addEventListener("pointerup", () => {
+    if (recorder && recorder.state === "recording") recorder.stop();
+    btn.classList.remove("recording");
+  });
+}
+setupRecord();
 </script>
 </body>
 </html>
