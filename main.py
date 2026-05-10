@@ -1,6 +1,11 @@
 """
-Lila — FastAPI server
-Thin transport layer. All logic in services/.
+Lila — FastAPI server (multi-user cloud deployment)
+
+Thin transport layer. All logic lives in services/. Every protected
+route depends on auth.get_current_user, which reads the lila_session
+cookie, validates the JWT, looks up the user row, and forwards the
+user dict to the route. We then thread user["user_id"] into every
+archive call so cross-user reads/writes are impossible.
 """
 
 import os
@@ -9,7 +14,16 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,19 +31,19 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+from services import archive, auth, conversation_store, pipeline, users
 from services.archive import (
-    RAW_DIR, ARCHIVE_ROOT,
-    ensure_archive_root,
-    get_feed, get_all_tags,
     current_entry,
-    update_file_meta,
     delete_file,
-    queue_job, get_jobs,
+    ensure_archive_root,
+    get_all_tags,
+    get_feed,
+    get_jobs,
+    queue_job,
     search,
-    migrate_v1,
+    update_file_meta,
 )
 from services.jobs import execute_job
-from services.pipeline import handle_text, handle_audio
 
 # Force unbuffered stdout so [LILA/*] prints appear immediately under uvicorn --reload
 import functools
@@ -44,8 +58,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_conversations: dict[str, list[dict]] = {}
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Startup
@@ -53,13 +65,73 @@ _conversations: dict[str, list[dict]] = {}
 
 @app.on_event("startup")
 async def startup():
+    """
+    1. Create the volume root + summaries dir if missing.
+    2. Per-user raw/ subdirs are created lazily by ingest, so there's
+       no per-user work to do here.
+    3. Make sure the static/ dir exists for the SPA mount below.
+    """
     ensure_archive_root()
-    n = migrate_v1()
-    if n:
-        import logging
-        logging.getLogger("lila").info(f"migrated {n} v1 files to event log")
     static_dir = Path(__file__).parent / "static"
     static_dir.mkdir(exist_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auth
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/auth/login")
+async def login(req: LoginRequest, response: Response):
+    """
+    1. Verify the password with argon2id (services/users).
+    2. Issue a JWT and set it as the lila_session cookie.
+    3. Return a tiny ack — the cookie does the work on subsequent
+       requests via auth.get_current_user.
+    """
+    if not users.verify_password(req.username, req.password):
+        raise HTTPException(401, "invalid credentials")
+    token = auth.encode_token(req.username)
+    auth.set_login_cookie(response, token)
+    return {"ok": True, "user_id": req.username}
+
+
+@app.post("/auth/logout")
+async def logout(response: Response):
+    """1. Clear the lila_session cookie. The JWT itself is stateless
+    so server-side revocation is a no-op."""
+    auth.clear_login_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+async def me(user: dict = Depends(auth.get_current_user)):
+    """1. Echo back the authenticated user — used by the web UI to
+    decide between the login screen and the main app."""
+    return {"user_id": user["user_id"], "username": user["username"]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Health
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
+    """
+    1. Ping the DB with a trivial SELECT.
+    2. Return ok on success, 503 on any failure — Render and load
+       balancers can hit this to gate traffic.
+    """
+    try:
+        from services import db as _db
+        _db.fetch_one("SELECT 1 AS ok")
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(503, f"db unreachable: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,48 +139,72 @@ async def startup():
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/feed")
-async def feed(tag: str = "", limit: int = 200, offset: int = 0):
-    return get_feed(tag=tag, limit=limit, offset=offset)
+async def feed(
+    tag: str = "",
+    limit: int = 200,
+    offset: int = 0,
+    user: dict = Depends(auth.get_current_user),
+):
+    """1. Return audio/text events for the authenticated user only."""
+    return get_feed(user["user_id"], tag=tag, limit=limit, offset=offset)
 
 
 @app.get("/tags")
-async def list_tags():
-    return get_all_tags()
+async def list_tags(user: dict = Depends(auth.get_current_user)):
+    """1. Tag tally restricted to the authenticated user's events."""
+    return get_all_tags(user["user_id"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# File serving  (raw files by file_id)
+# File serving (raw files by file_id, scoped under <volume>/<user_id>/raw/)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _AUDIO_EXT = {".ogg", ".mp3", ".wav", ".m4a", ".flac", ".aac", ".opus"}
 
 
-def _find_audio_path(file_id: str) -> Path | None:
-    matches = [m for m in RAW_DIR.glob(f"{file_id}.*") if m.suffix.lower() in _AUDIO_EXT]
+def _find_audio_path(user_id: str, file_id: str) -> Path | None:
+    """
+    1. Glob the user's raw/ dir for file_id.<anything>.
+    2. Filter to known audio extensions; return the first match (or None).
+    """
+    raw_dir = archive.VOLUME_ROOT / user_id / "raw"
+    matches = [m for m in raw_dir.glob(f"{file_id}.*") if m.suffix.lower() in _AUDIO_EXT]
     return matches[0] if matches else None
 
 
 @app.get("/files/{file_id}/audio")
 @app.get("/files/{file_id}/audio/{filename}")
-async def serve_audio(file_id: str, filename: str = ""):
+async def serve_audio(
+    file_id: str,
+    filename: str = "",
+    user: dict = Depends(auth.get_current_user),
+):
     """
-    Serve the raw audio with a proper attachment Content-Disposition so
-    drag-to-desktop lands as a real file. The optional /{filename} suffix
-    lets the drag URL end in a real extension — so even browsers that
-    ignore the Chrome DownloadURL protocol name the drop correctly.
+    1. Resolve the raw audio path under the user's partition.
+    2. 404 if missing (either the file_id doesn't belong to this user
+       or the file is gone from disk).
+    3. Stream it with a slug-based attachment filename so drag-to-
+       desktop lands as a real file. The optional /{filename} suffix
+       in the URL lets the drag URL end in a real extension — browsers
+       that ignore the Chrome DownloadURL protocol still name the
+       drop correctly.
     """
-    path = _find_audio_path(file_id)
+    path = _find_audio_path(user["user_id"], file_id)
     if not path:
         raise HTTPException(404, "audio file not found")
-    sc   = current_entry(file_id) or {}
+    sc = current_entry(user["user_id"], file_id) or {}
     slug = sc.get("slug") or file_id
-    ext  = path.suffix.lstrip(".")
+    ext = path.suffix.lstrip(".")
     return FileResponse(str(path), filename=f"{slug}.{ext}")
 
 
 @app.get("/files/{file_id}/text")
-async def serve_text(file_id: str):
-    p = RAW_DIR / f"{file_id}.txt"
+async def serve_text(
+    file_id: str,
+    user: dict = Depends(auth.get_current_user),
+):
+    """1. Read the .txt sidecar from the user's raw/ dir. 404 if absent."""
+    p = archive.VOLUME_ROOT / user["user_id"] / "raw" / f"{file_id}.txt"
     if not p.exists():
         raise HTTPException(404, "text file not found")
     return {"text": p.read_text()}
@@ -116,17 +212,31 @@ async def serve_text(file_id: str):
 
 @app.get("/files/{file_id}/midi")
 @app.get("/files/{file_id}/midi/{filename}")
-async def serve_midi(file_id: str, filename: str = ""):
-    """Render the sidecar's NOTE data to a real .mid file for DAW drag-in."""
+async def serve_midi(
+    file_id: str,
+    filename: str = "",
+    user: dict = Depends(auth.get_current_user),
+):
+    """
+    Render the entry's NOTE data to a real .mid file for DAW drag-in.
+
+    1. Look up the entry for this user; 404 if missing.
+    2. Pull NOTE text from the row's midi_notes column, or fall back
+       to scanning the on-disk text sidecar (legacy entries stored
+       NOTE lines there).
+    3. Render NOTE text → MIDI bytes via services.jobs.
+    4. Return as audio/midi with a slug-based attachment filename.
+    """
     from fastapi.responses import Response
     from services.jobs import notes_text_to_midi_bytes
-    sc = current_entry(file_id)
+
+    sc = current_entry(user["user_id"], file_id)
     if not sc:
         raise HTTPException(404, "file not found")
 
     notes = sc.get("midi_notes") or ""
     if not notes:
-        raw = RAW_DIR / f"{file_id}.txt"
+        raw = archive.VOLUME_ROOT / user["user_id"] / "raw" / f"{file_id}.txt"
         if raw.exists():
             content = raw.read_text()
             if "NOTE " in content:
@@ -144,7 +254,7 @@ async def serve_midi(file_id: str, filename: str = ""):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Meta update (inline edit from UI)
+# Meta update (inline edit from UI) + soft delete
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PatchFileRequest(BaseModel):
@@ -153,18 +263,22 @@ class PatchFileRequest(BaseModel):
 
 
 @app.patch("/files/{file_id}")
-async def patch_file(file_id: str, req: PatchFileRequest):
+async def patch_file(
+    file_id: str,
+    req: PatchFileRequest,
+    user: dict = Depends(auth.get_current_user),
+):
     """
     1. Inline edits from the web UI rewrite the matching event in
        place via update_file_meta.
-    2. update_file_meta also snapshots the prior state into the undo
-       buffer, so a follow-up call to undo_last_action() can restore
-       the entry if the edit was wrong.
+    2. update_file_meta also snapshots the prior state into the user's
+       last_action buffer so a follow-up call to undo_last_action()
+       can restore the entry if the edit was wrong.
     3. Returns 404 if the file_id is missing or already deleted —
        update_file_meta returns False in that case.
     """
     ok = update_file_meta(
-        file_id, transcript=req.transcript, tags=req.tags,
+        user["user_id"], file_id, transcript=req.transcript, tags=req.tags,
     )
     if not ok:
         raise HTTPException(404, "file not found")
@@ -172,55 +286,16 @@ async def patch_file(file_id: str, req: PatchFileRequest):
 
 
 @app.delete("/files/{file_id}")
-async def delete_file_endpoint(file_id: str):
-    ok = delete_file(file_id)
+async def delete_file_endpoint(
+    file_id: str,
+    user: dict = Depends(auth.get_current_user),
+):
+    """1. Append a delete event so the entry disappears from feeds.
+    Raw bytes stay on disk in case manual restore is needed."""
+    ok = delete_file(user["user_id"], file_id)
     if not ok:
         raise HTTPException(404, "file not found")
     return {"ok": True}
-
-
-@app.post("/files/{file_id}/reveal")
-async def reveal_file(file_id: str):
-    """
-    Open the OS file manager with the file selected, so the user can drag
-    it into their DAW directly. MIDI entries are materialized to disk on
-    first reveal (they only exist as NOTE text otherwise).
-    """
-    import subprocess, platform
-    sc = current_entry(file_id)
-    if not sc:
-        raise HTTPException(404, "file not found")
-
-    ext   = (sc.get("ext") or "").lstrip(".")
-    notes = sc.get("midi_notes") or ""
-    path  = None
-
-    if notes:
-        mid_path = RAW_DIR / f"{file_id}.mid"
-        if not mid_path.exists():
-            from services.jobs import notes_text_to_midi_bytes
-            mid_path.write_bytes(notes_text_to_midi_bytes(notes))
-        path = mid_path
-    else:
-        candidate = RAW_DIR / f"{file_id}.{ext}" if ext else None
-        if candidate and candidate.exists():
-            path = candidate
-
-    if not path or not path.exists():
-        raise HTTPException(404, f"file not on disk for {file_id}")
-
-    system = platform.system()
-    try:
-        if system == "Darwin":
-            subprocess.Popen(["open", "-R", str(path)])
-        elif system == "Windows":
-            subprocess.Popen(["explorer", f"/select,{path}"])
-        else:
-            subprocess.Popen(["xdg-open", str(path.parent)])
-    except Exception as e:
-        raise HTTPException(500, f"reveal failed: {e}")
-
-    return {"ok": True, "path": str(path)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,10 +303,15 @@ async def reveal_file(file_id: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/search")
-async def search_endpoint(q: str = ""):
+async def search_endpoint(
+    q: str = "",
+    user: dict = Depends(auth.get_current_user),
+):
+    """1. Empty query → empty list. 2. Otherwise scoped substring
+    search across the user's live entries."""
     if not q:
         return []
-    return search(q)
+    return search(user["user_id"], q)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,24 +322,40 @@ async def search_endpoint(q: str = ""):
 async def ingest_audio_endpoint(
     file: UploadFile = File(...),
     context: Optional[str] = Form(None),
-    conversation_id: Optional[str] = Form(None),
+    user: dict = Depends(auth.get_current_user),
 ):
+    """
+    1. Spool the upload to a temp file with the original suffix
+       preserved so transcription picks the right decoder.
+    2. Pull the user's recent conversation history (per-user-global,
+       no conversation_id keying — Postgres-backed via
+       conversation_store).
+    3. Hand off to pipeline.handle_audio with the user_id threaded
+       through; the pipeline stages the audio under the user's
+       partition and decides whether to commit based on the LLM.
+    4. Append both turns (user + assistant) to the user's history.
+    5. Always unlink the temp file when done.
+    """
     suffix = Path(file.filename or "audio.ogg").suffix or ".ogg"
-    ext = suffix.lstrip(".")
-    conv_id = conversation_id or "default"
-
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
-
     try:
-        history = _conversations.get(conv_id, [])
-        result = handle_audio(tmp_path, ext, context or "", history, transport="web")
-
-        history.append({"role": "user", "content": context or result["transcript"] or "(audio)"})
-        history.append({"role": "assistant", "content": result["message"]})
-        _conversations[conv_id] = history[-20:]
-
+        history = conversation_store.recent(user["user_id"], limit=20)
+        result = pipeline.handle_audio(
+            user["user_id"],
+            tmp_path,
+            suffix.lstrip("."),
+            user_context=context or "",
+            history=history,
+            transport="web",
+        )
+        conversation_store.append(
+            user["user_id"], "user", context or "(audio)",
+        )
+        conversation_store.append(
+            user["user_id"], "assistant", result["message"],
+        )
         return result
     finally:
         try:
@@ -273,40 +369,40 @@ async def ingest_audio_endpoint(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TextRequest(BaseModel):
+    """
+    Per-user-global history means the body is just a message —
+    history is keyed only by user_id now (was previously keyed by an
+    in-memory conversation_id dict).
+    """
     message: str
-    conversation_id: str = "default"
-
-
-def _print_job_queue():
-    from services.archive import JOBS_DIR
-    import json as _j
-    jobs = []
-    if JOBS_DIR.exists():
-        for p in sorted(JOBS_DIR.iterdir()):
-            if p.suffix == ".json":
-                try: jobs.append(_j.loads(p.read_text()))
-                except Exception: pass
-    print(f"[LILA/queue] {len(jobs)} jobs total:")
-    for j in jobs[-10:]:
-        print(f"  • {j.get('job_id')} {j.get('type')} status={j.get('status')} "
-              f"input={j.get('input_file_id')} output={j.get('output_file_id')}")
 
 
 @app.post("/ingest/text")
-async def ingest_text_endpoint(req: TextRequest):
+async def ingest_text_endpoint(
+    req: TextRequest,
+    user: dict = Depends(auth.get_current_user),
+):
+    """
+    1. Pull the user's last 20 turns from Postgres.
+    2. Forward to pipeline.handle_text — this stays synchronous
+       because the LLM tool loop may queue + execute a job inline,
+       and the LLM expects the result before composing its reply.
+    3. Skip history append for type='eval' — eval flags are pure
+       feedback notes that should not pollute future LLM context.
+    4. Otherwise persist both the user message and the assistant
+       reply via conversation_store.
+    """
     print(f"\n[LILA/text] incoming: {req.message!r}")
-    _print_job_queue()
-    history = _conversations.get(req.conversation_id, [])
+    history = conversation_store.recent(user["user_id"], limit=20)
 
-    result = handle_text(req.message, history, transport="web")
+    result = pipeline.handle_text(
+        user["user_id"], req.message, history, transport="web",
+    )
 
     if result.get("type") != "eval":
-        history.append({"role": "user",      "content": req.message})
-        history.append({"role": "assistant", "content": result["message"]})
-        _conversations[req.conversation_id] = history[-20:]
+        conversation_store.append(user["user_id"], "user", req.message)
+        conversation_store.append(user["user_id"], "assistant", result["message"])
     return result
-
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -320,28 +416,58 @@ class JobRequest(BaseModel):
 
 
 @app.post("/jobs")
-async def create_job(req: JobRequest):
-    sc = current_entry(req.input_file_id)
+async def create_job(
+    req: JobRequest,
+    bg: BackgroundTasks,
+    user: dict = Depends(auth.get_current_user),
+):
+    """
+    1. Validate the input file exists for this user — guard against
+       a caller queueing a job against another user's file_id.
+    2. queue_job creates a 'queued' row + event immediately.
+    3. Schedule execute_job in the background and return the queued
+       row so the caller does not wait on the side-effect. Note:
+       the chat-driven job path through pipeline.handle_text stays
+       synchronous (the LLM expects the result before composing its
+       reply) — this BackgroundTasks path is for the explicit
+       /jobs HTTP route only.
+    """
+    sc = current_entry(user["user_id"], req.input_file_id)
     if not sc:
         raise HTTPException(404, "input file not found")
-    job = queue_job(req.job_type, req.input_file_id, req.params)
-    execute_job(job)
+    job = queue_job(user["user_id"], req.job_type, req.input_file_id, req.params)
+    bg.add_task(execute_job, user["user_id"], job)
     return job
 
 
 @app.get("/jobs")
-async def list_jobs(status: Optional[str] = None):
-    return get_jobs(status=status)
+async def list_jobs(
+    status: Optional[str] = None,
+    user: dict = Depends(auth.get_current_user),
+):
+    """1. Newest-first list of the user's jobs, optionally filtered
+    by status."""
+    return get_jobs(user["user_id"], status=status)
 
 
 @app.get("/jobs/{job_id}")
-async def get_job(job_id: str):
-    from services.archive import JOBS_DIR
-    import json
-    p = JOBS_DIR / f"{job_id}.json"
-    if not p.exists():
+async def get_job(
+    job_id: str,
+    user: dict = Depends(auth.get_current_user),
+):
+    """
+    1. Look up the job row by (user_id, job_id) — scoping by user_id
+       prevents cross-user reads even if a caller guesses an id.
+    2. 404 if missing.
+    """
+    from services import db as _db
+    row = _db.fetch_one(
+        "SELECT * FROM jobs WHERE user_id = %s AND job_id = %s",
+        (user["user_id"], job_id),
+    )
+    if not row:
         raise HTTPException(404, "job not found")
-    return json.loads(p.read_text())
+    return dict(row)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
