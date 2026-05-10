@@ -1291,7 +1291,7 @@ function scheduleBodySave(el) {
     const val   = el.innerText.trim();
     const field = el.dataset.field;
     const payload = field === 'text'
-      ? { transcript: val }
+      ? { text: val }
       : { transcript: val };
     api(`/files/${fid}`, {
       method: 'PATCH',
@@ -1510,7 +1510,7 @@ async function sendMessage() {
     const res = await api('/ingest/text', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, conversation_id: S.conversationId }),
+      body: JSON.stringify({ message: msg }),
     });
     appendMsg('lila', res.message);
     await loadFeed();
@@ -1528,7 +1528,6 @@ async function uploadAudio(file) {
   status.textContent = 'processing…';
   const form = new FormData();
   form.append('file', file);
-  form.append('conversation_id', S.conversationId);
   try {
     const res = await fetch('/ingest/audio', { method: 'POST', body: form });
     if (!res.ok) throw new Error(await res.text());
