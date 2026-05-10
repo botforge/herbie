@@ -145,10 +145,18 @@ def handle_audio(
         parts.append(f"Caption: {user_context}")
     parts.append(f'Voice note transcribed: "{body}"')
     parts.append(
-        "The audio file is already staged. "
-        "Default: call file_audio(slug, tags) to archive it. "
-        "Only skip filing if the transcript is clearly an instruction or question — "
-        "when in doubt, treat it as creative content and file it."
+        "The audio is staged. Default: call file_audio(slug, tags) for "
+        "creative content (lyric, melody, hum, ambient). When in doubt, "
+        "use this.\n\n"
+        "If the transcript is itself an instruction targeting an earlier "
+        "entry — strong signals: the phrase \"file system note\", or "
+        "openers like \"no\", \"actually\", \"I mean\", \"wait\", \"fix\", "
+        "\"delete\", \"rename\" — call file_system_note(content, "
+        "target_file_id) instead. Resolve target via list_entries; if "
+        "you can't identify one, file the note with target_file_id "
+        "omitted.\n\n"
+        "Do not reply with \"filed\" unless you actually called file_audio. "
+        "If you called file_system_note, reply with a brief \"noted\"."
     )
     llm_message = "\n".join(parts)
 

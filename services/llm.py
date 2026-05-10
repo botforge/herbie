@@ -370,7 +370,10 @@ _FILE_AUDIO_TOOL = {
             "before filing. Generate a slug and tags from whatever context "
             "the transcript provides.\n\n"
             "Only skip filing if the transcript is clearly a command "
-            "(file_system_note, list_entries, read_entries, queue_job, etc.)."
+            "(file_system_note, list_entries, read_entries, queue_job, etc.).\n\n"
+            "Do NOT reply with a \"filed\" message unless you actually invoked "
+            "this tool — if no call is made, the staged audio is discarded "
+            "and nothing was saved."
         ),
         "parameters": {
             "type": "object",
