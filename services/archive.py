@@ -23,11 +23,9 @@ How to read this module:
      undo_last_action.
 """
 
-import json
 import os
 import secrets
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -78,20 +76,12 @@ def ensure_archive_root() -> None:
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── Forward stubs — reimplemented in Tasks 7–10 ──────────────────────────────
+# ── Forward stubs — reimplemented in Tasks 8–10 ──────────────────────────────
 # These names are imported at module level by services/render.py,
 # services/jobs.py, and services/pipeline.py. Defining them here as
 # NotImplementedError stubs keeps those modules importable (so pytest
 # can collect every test file) while ensuring any call to them fails
-# loudly — the intended red state for Tasks 6–9.
-
-def current_entry(*args, **kwargs):
-    raise NotImplementedError("archive.current_entry not yet reimplemented (Task 7)")
-
-
-def ingest_audio(*args, **kwargs):
-    raise NotImplementedError("archive.ingest_audio not yet reimplemented (Task 7)")
-
+# loudly — the intended red state for Tasks 8–10.
 
 def ingest_text(*args, **kwargs):
     raise NotImplementedError("archive.ingest_text not yet reimplemented (Task 8)")
@@ -106,8 +96,126 @@ def get_slug_version(*args, **kwargs):
 
 
 def stage_audio(*args, **kwargs):
-    raise NotImplementedError("archive.stage_audio not yet reimplemented (Task 7)")
+    raise NotImplementedError("archive.stage_audio not yet reimplemented (Task 10)")
 
 
 def commit_audio(*args, **kwargs):
-    raise NotImplementedError("archive.commit_audio not yet reimplemented (Task 7)")
+    raise NotImplementedError("archive.commit_audio not yet reimplemented (Task 10)")
+
+
+# ── Audio ingest ─────────────────────────────────────────────────────────────
+
+def ingest_audio(
+    user_id: str,
+    src_path: str,
+    slug: str,
+    tags: list[str],
+    ext: str,
+    transcript: str = "",
+    parent_id: str | None = None,
+) -> dict:
+    """
+    1. Make sure the per-user raw/ directory exists.
+    2. If parent_id is given, inherit its tags so derived files
+       carry their lineage automatically.
+    3. Copy the source bytes to <volume>/<user>/raw/<file_id>.<ext>
+       BEFORE inserting the event — the row should never refer to
+       a file that does not exist on disk.
+    4. INSERT one audio event row and RETURNING * so the caller sees
+       the canonical shape (with created_at populated by Postgres).
+    """
+    ensure_user_dirs(user_id)
+    if parent_id:
+        parent = current_entry(user_id, parent_id)
+        inherited = parent.get("tags", [])
+        tags = inherited + [t for t in tags if t not in inherited]
+
+    file_id = _new_id()
+    ext = ext.lstrip(".")
+    shutil.copy2(str(src_path), str(_raw_dir(user_id) / f"{file_id}.{ext}"))
+
+    event_id = _new_id()
+    with _db.connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO events
+               (event_id, user_id, type, file_id, slug, tags,
+                transcript, ext, parent_id, job_id)
+               VALUES (%s, %s, 'audio', %s, %s, %s, %s, %s, %s, NULL)
+               RETURNING *""",
+            (event_id, user_id, file_id, slug, tags, transcript, ext, parent_id),
+        )
+        row = cur.fetchone()
+    row["id"] = row["file_id"]
+    return row
+
+
+# ── Reads ────────────────────────────────────────────────────────────────────
+
+def current_entry(user_id: str, file_id: str) -> dict:
+    """
+    1. Look for a delete event for this (user, file_id). If one
+       exists, the entry is gone from the user's perspective →
+       return {}.
+    2. Otherwise return the audio/text event row for the file_id.
+       Empty dict (not None) so callers can chain .get(...).
+    3. Alias `id` ← `file_id` so legacy call sites that read
+       entry["id"] still work.
+    """
+    deleted = _db.fetch_one(
+        """SELECT 1 FROM events
+           WHERE user_id = %s AND file_id = %s AND type = 'delete'
+           LIMIT 1""",
+        (user_id, file_id),
+    )
+    if deleted:
+        return {}
+    row = _db.fetch_one(
+        """SELECT * FROM events
+           WHERE user_id = %s AND file_id = %s AND type IN ('audio','text')
+           ORDER BY created_at DESC LIMIT 1""",
+        (user_id, file_id),
+    )
+    if not row:
+        return {}
+    row["id"] = row["file_id"]
+    return row
+
+
+def get_feed(user_id: str, tag: str = "", limit: int = 100, offset: int = 0) -> list[dict]:
+    """
+    1. Return audio/text events newest-first.
+    2. Exclude any file_id that has a delete event.
+    3. Optionally filter by tag (array containment).
+    """
+    if tag:
+        sql = """
+            SELECT e.* FROM events e
+            WHERE e.user_id = %s
+              AND e.type IN ('audio','text')
+              AND %s = ANY(e.tags)
+              AND NOT EXISTS (
+                  SELECT 1 FROM events d
+                  WHERE d.user_id = e.user_id
+                    AND d.file_id = e.file_id
+                    AND d.type = 'delete')
+            ORDER BY e.created_at DESC
+            LIMIT %s OFFSET %s
+        """
+        rows = _db.fetch_all(sql, (user_id, tag, limit, offset))
+    else:
+        sql = """
+            SELECT e.* FROM events e
+            WHERE e.user_id = %s
+              AND e.type IN ('audio','text')
+              AND NOT EXISTS (
+                  SELECT 1 FROM events d
+                  WHERE d.user_id = e.user_id
+                    AND d.file_id = e.file_id
+                    AND d.type = 'delete')
+            ORDER BY e.created_at DESC
+            LIMIT %s OFFSET %s
+        """
+        rows = _db.fetch_all(sql, (user_id, limit, offset))
+    for r in rows:
+        r["id"] = r["file_id"]
+    return rows
