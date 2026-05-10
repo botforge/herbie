@@ -1,0 +1,43 @@
+app = "lila"
+primary_region = "iad"            # change at deploy time if you prefer sjc / lhr
+kill_signal    = "SIGINT"
+kill_timeout   = "5s"
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+ARCHIVE_PATH = "/data/archive"
+
+[[mounts]]
+source      = "lila_data"
+destination = "/data"
+
+[processes]
+web      = "uvicorn main:app --host 0.0.0.0 --port 8080"
+telegram = "python telegram_bot.py"
+
+[[services]]
+processes      = ["web"]
+internal_port  = 8080
+protocol       = "tcp"
+auto_stop_machines  = false
+auto_start_machines = true
+min_machines_running = 1
+
+  [[services.ports]]
+  port     = 80
+  handlers = ["http"]
+  force_https = true
+
+  [[services.ports]]
+  port     = 443
+  handlers = ["tls", "http"]
+
+  [[services.http_checks]]
+  interval        = "15s"
+  grace_period    = "30s"
+  method          = "GET"
+  path            = "/health"
+  protocol        = "http"
+  timeout         = "5s"
