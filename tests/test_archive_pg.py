@@ -73,3 +73,52 @@ def test_get_feed_newest_first_with_tag(
 
     feed = archive.get_feed(uid, tag="a")
     assert [e["slug"] for e in feed] == ["newer", "older"]
+
+
+def test_ingest_text_inserts_row_and_writes_payload(
+    db, seed_user, temp_volume,
+):
+    uid = seed_user("dhruv")
+    ev = archive.ingest_text(uid, "lyrics-1", ["lyric"], "all the broken hours")
+
+    txt = temp_volume / uid / "raw" / f"{ev['file_id']}.txt"
+    assert txt.exists()
+    assert txt.read_text() == "all the broken hours"
+
+    feed = archive.get_feed(uid)
+    assert any(e["file_id"] == ev["file_id"] for e in feed)
+
+
+def test_get_all_tags_counts_per_user(db, seed_user, fake_audio, temp_volume):
+    uid = seed_user("dhruv")
+    archive.ingest_audio(uid, str(fake_audio), "a", ["x", "y"], "ogg", "")
+    archive.ingest_audio(uid, str(fake_audio), "b", ["x"],     "ogg", "")
+    archive.ingest_text(uid, "n", ["x", "y"], "note")
+
+    by_tag = {t["tag"]: t["count"] for t in archive.get_all_tags(uid)}
+    assert by_tag == {"x": 3, "y": 2}
+
+
+def test_delete_file_soft_deletes_and_filter_drops_it(
+    db, seed_user, fake_audio, temp_volume,
+):
+    uid = seed_user("dhruv")
+    ev = archive.ingest_audio(uid, str(fake_audio), "kill-me", ["x"], "ogg", "")
+    assert archive.delete_file(uid, ev["file_id"]) is True
+    assert archive.current_entry(uid, ev["file_id"]) == {}
+    assert ev["file_id"] not in [e["file_id"] for e in archive.get_feed(uid)]
+
+
+def test_search_matches_slug_tag_text_transcript(
+    db, seed_user, fake_audio, temp_volume,
+):
+    uid = seed_user("dhruv")
+    archive.ingest_audio(uid, str(fake_audio), "monastery-loop", ["foley"], "ogg",
+                         "the bell rings once")
+    archive.ingest_text(uid, "lyrics-x", ["lyric"], "hospital corridor lights")
+
+    res = archive.search(uid, "bell")
+    assert any(e["slug"] == "monastery-loop" for e in res)
+
+    res2 = archive.search(uid, "corridor")
+    assert any(e["slug"] == "lyrics-x" for e in res2)

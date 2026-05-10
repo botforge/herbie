@@ -76,15 +76,52 @@ def ensure_archive_root() -> None:
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── Forward stubs — reimplemented in Tasks 8–10 ──────────────────────────────
+# ── Forward stubs — reimplemented in Tasks 9–10 ──────────────────────────────
 # These names are imported at module level by services/render.py,
 # services/jobs.py, and services/pipeline.py. Defining them here as
 # NotImplementedError stubs keeps those modules importable (so pytest
 # can collect every test file) while ensuring any call to them fails
-# loudly — the intended red state for Tasks 8–10.
+# loudly — the intended red state for Tasks 9–10.
+# ingest_text (Task 8) is fully implemented above; only complete_job,
+# get_slug_version, stage_audio, and commit_audio remain as stubs.
 
-def ingest_text(*args, **kwargs):
-    raise NotImplementedError("archive.ingest_text not yet reimplemented (Task 8)")
+def ingest_text(
+    user_id: str,
+    slug: str,
+    tags: list[str],
+    text: str,
+    parent_id: str | None = None,
+    midi_notes: str | None = None,
+) -> dict:
+    """
+    1. Inherit parent tags when parent_id is given.
+    2. Persist the user-visible text (or midi notes when present)
+       to <volume>/<user>/raw/<fid>.txt so legacy file-serving
+       routes that look up {file_id}.txt continue to work.
+    3. INSERT one text event row.
+    """
+    ensure_user_dirs(user_id)
+    if parent_id:
+        parent = current_entry(user_id, parent_id)
+        inherited = parent.get("tags", [])
+        tags = inherited + [t for t in tags if t not in inherited]
+
+    file_id = _new_id()
+    (_raw_dir(user_id) / f"{file_id}.txt").write_text(midi_notes or text)
+
+    event_id = _new_id()
+    with _db.connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO events
+               (event_id, user_id, type, file_id, slug, tags,
+                text, midi_notes, ext, parent_id, job_id)
+               VALUES (%s, %s, 'text', %s, %s, %s, %s, %s, 'txt', %s, NULL)
+               RETURNING *""",
+            (event_id, user_id, file_id, slug, tags, text, midi_notes, parent_id),
+        )
+        row = cur.fetchone()
+    row["id"] = row["file_id"]
+    return row
 
 
 def complete_job(*args, **kwargs):
@@ -216,6 +253,80 @@ def get_feed(user_id: str, tag: str = "", limit: int = 100, offset: int = 0) -> 
             LIMIT %s OFFSET %s
         """
         rows = _db.fetch_all(sql, (user_id, limit, offset))
+    for r in rows:
+        r["id"] = r["file_id"]
+    return rows
+
+
+# ── Tag tally ────────────────────────────────────────────────────────────────
+
+def get_all_tags(user_id: str) -> list[dict]:
+    """Counts each tag across the user's live (non-deleted) entries."""
+    rows = _db.fetch_all(
+        """SELECT tag, COUNT(*) AS count
+           FROM (
+               SELECT UNNEST(e.tags) AS tag
+               FROM events e
+               WHERE e.user_id = %s
+                 AND e.type IN ('audio','text')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM events d
+                     WHERE d.user_id = e.user_id
+                       AND d.file_id = e.file_id
+                       AND d.type = 'delete')
+           ) t
+           GROUP BY tag
+           ORDER BY count DESC""",
+        (user_id,),
+    )
+    return [dict(r) for r in rows]
+
+
+# ── Soft delete ──────────────────────────────────────────────────────────────
+
+def delete_file(user_id: str, file_id: str) -> bool:
+    """
+    1. Confirm the entry is currently live; if not, return False
+       (already deleted or never existed).
+    2. INSERT a delete event so future reads filter the entry out.
+       The raw bytes on disk are intentionally left in place so a
+       manual restore is still possible by removing the delete row.
+    """
+    if not current_entry(user_id, file_id):
+        return False
+    _db.execute(
+        """INSERT INTO events (event_id, user_id, type, file_id)
+           VALUES (%s, %s, 'delete', %s)""",
+        (_new_id(), user_id, file_id),
+    )
+    return True
+
+
+# ── Search ───────────────────────────────────────────────────────────────────
+
+def search(user_id: str, query: str) -> list[dict]:
+    """Case-insensitive substring match across slug, tags, transcript, text."""
+    q = f"%{query.lower()}%"
+    rows = _db.fetch_all(
+        """SELECT e.* FROM events e
+           WHERE e.user_id = %s
+             AND e.type IN ('audio','text')
+             AND NOT EXISTS (
+                 SELECT 1 FROM events d
+                 WHERE d.user_id = e.user_id
+                   AND d.file_id = e.file_id
+                   AND d.type = 'delete')
+             AND (
+                 LOWER(COALESCE(e.slug, ''))       LIKE %s OR
+                 LOWER(COALESCE(e.transcript, '')) LIKE %s OR
+                 LOWER(COALESCE(e.text, ''))       LIKE %s OR
+                 EXISTS (
+                     SELECT 1 FROM UNNEST(e.tags) tg
+                     WHERE LOWER(tg) LIKE %s)
+             )
+           ORDER BY e.created_at DESC""",
+        (user_id, q, q, q, q),
+    )
     for r in rows:
         r["id"] = r["file_id"]
     return rows
