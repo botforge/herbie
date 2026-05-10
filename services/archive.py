@@ -23,6 +23,7 @@ How to read this module:
      undo_last_action.
 """
 
+import json
 import os
 import secrets
 import shutil
@@ -76,14 +77,7 @@ def ensure_archive_root() -> None:
     SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── Forward stubs — reimplemented in Tasks 9–10 ──────────────────────────────
-# These names are imported at module level by services/render.py,
-# services/jobs.py, and services/pipeline.py. Defining them here as
-# NotImplementedError stubs keeps those modules importable (so pytest
-# can collect every test file) while ensuring any call to them fails
-# loudly — the intended red state for Tasks 9–10.
-# ingest_text (Task 8) is fully implemented above; only complete_job,
-# get_slug_version, stage_audio, and commit_audio remain as stubs.
+# ── Text ingest ──────────────────────────────────────────────────────────────
 
 def ingest_text(
     user_id: str,
@@ -123,6 +117,13 @@ def ingest_text(
     row["id"] = row["file_id"]
     return row
 
+
+# ── Forward stubs — reimplemented in Tasks 9–10 ──────────────────────────────
+# These names are imported at module level by services/render.py,
+# services/jobs.py, and services/pipeline.py. Defining them here as
+# NotImplementedError stubs keeps those modules importable (so pytest
+# can collect every test file) while ensuring any call to them fails
+# loudly — the intended red state for Tasks 9–10.
 
 def complete_job(*args, **kwargs):
     raise NotImplementedError("archive.complete_job not yet reimplemented (Task 9)")
@@ -261,7 +262,13 @@ def get_feed(user_id: str, tag: str = "", limit: int = 100, offset: int = 0) -> 
 # ── Tag tally ────────────────────────────────────────────────────────────────
 
 def get_all_tags(user_id: str) -> list[dict]:
-    """Counts each tag across the user's live (non-deleted) entries."""
+    """
+    1. UNNEST every live (non-deleted) audio/text entry's tags into rows.
+    2. GROUP BY the tag column, count occurrences.
+    3. ORDER BY count DESC so the most-used tags lead the list.
+    4. Return as a list of {tag, count} dicts — the shape get_feed
+       callers and the web tag-cloud expect.
+    """
     rows = _db.fetch_all(
         """SELECT tag, COUNT(*) AS count
            FROM (
@@ -305,7 +312,16 @@ def delete_file(user_id: str, file_id: str) -> bool:
 # ── Search ───────────────────────────────────────────────────────────────────
 
 def search(user_id: str, query: str) -> list[dict]:
-    """Case-insensitive substring match across slug, tags, transcript, text."""
+    """
+    Case-insensitive substring search across slug, transcript, text,
+    and individual tags for one user's live entries.
+
+    1. Wrap the query in % on both sides for LIKE matching.
+    2. Filter to live (non-deleted) audio/text events for this user.
+    3. Match against slug / transcript / text / each tag in turn —
+       any hit qualifies the row.
+    4. Return newest-first.
+    """
     q = f"%{query.lower()}%"
     rows = _db.fetch_all(
         """SELECT e.* FROM events e
@@ -330,3 +346,140 @@ def search(user_id: str, query: str) -> list[dict]:
     for r in rows:
         r["id"] = r["file_id"]
     return rows
+
+
+# ── In-place edit (web PATCH only) + single-step undo ───────────────────────
+
+def update_files_meta(
+    user_id: str,
+    file_ids: list[str],
+    slug: str | None = None,
+    tags: list[str] | None = None,
+    transcript: str | None = None,
+    text: str | None = None,
+) -> int:
+    """
+    Web PATCH endpoint helper. Mutates rows in place — the chat
+    surface still uses append-only file_system_note.
+
+    1. Build the SET clause from supplied fields. If nothing to
+       change, return 0.
+    2. In one transaction:
+       2A. SELECT every targeted live (non-deleted) audio/text row
+           into a snapshot list.
+       2B. Persist that snapshot to last_action (replacing any prior
+           buffer for this user).
+       2C. UPDATE the rows with the supplied fields.
+    3. Return the number of rows actually changed.
+    """
+    fields: dict = {}
+    if slug       is not None: fields["slug"]       = slug
+    if tags       is not None: fields["tags"]       = tags
+    if transcript is not None: fields["transcript"] = transcript
+    if text       is not None: fields["text"]       = text
+    if not fields or not file_ids:
+        return 0
+
+    set_sql = ", ".join(f"{k} = %s" for k in fields)
+    params = list(fields.values())
+
+    with _db.connect() as conn:
+        snap_rows = conn.execute(
+            """SELECT * FROM events
+               WHERE user_id = %s
+                 AND file_id = ANY(%s)
+                 AND type IN ('audio','text')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM events d
+                     WHERE d.user_id = events.user_id
+                       AND d.file_id = events.file_id
+                       AND d.type = 'delete')""",
+            (user_id, file_ids),
+        ).fetchall()
+        if not snap_rows:
+            return 0
+
+        snapshots = [_serialize_row_for_snapshot(r) for r in snap_rows]
+        conn.execute(
+            """INSERT INTO last_action (user_id, snapshots)
+               VALUES (%s, %s)
+               ON CONFLICT (user_id) DO UPDATE
+                 SET snapshots = EXCLUDED.snapshots,
+                     updated_at = now()""",
+            (user_id, json.dumps(snapshots)),
+        )
+        upd = conn.execute(
+            f"""UPDATE events SET {set_sql}
+                WHERE user_id = %s AND file_id = ANY(%s)
+                  AND type IN ('audio','text')""",
+            (*params, user_id, file_ids),
+        )
+        return upd.rowcount or 0
+
+
+def update_file_meta(
+    user_id: str,
+    file_id: str,
+    slug: str | None = None,
+    tags: list[str] | None = None,
+    transcript: str | None = None,
+    text: str | None = None,
+) -> bool:
+    """
+    1. Delegate to update_files_meta with a single-element list.
+    2. Return True if at least one row was changed, False otherwise.
+    """
+    return update_files_meta(
+        user_id, [file_id],
+        slug=slug, tags=tags, transcript=transcript, text=text,
+    ) > 0
+
+
+def undo_last_action(user_id: str) -> int:
+    """
+    1. Read the last_action row for the user. None → nothing to do,
+       return 0.
+    2. For each snapshot, restore the prior column values via UPDATE.
+    3. Delete the buffer so subsequent undo calls are no-ops.
+    4. Return the number of rows restored.
+    """
+    with _db.connect() as conn:
+        row = conn.execute(
+            "SELECT snapshots FROM last_action WHERE user_id = %s", (user_id,),
+        ).fetchone()
+        if not row:
+            return 0
+        snapshots = row["snapshots"]
+        if isinstance(snapshots, str):
+            snapshots = json.loads(snapshots)
+        for snap in snapshots:
+            conn.execute(
+                """UPDATE events SET
+                       slug = %s, tags = %s, transcript = %s,
+                       text = %s, midi_notes = %s
+                   WHERE user_id = %s AND file_id = %s
+                     AND type IN ('audio','text')""",
+                (
+                    snap.get("slug"),
+                    snap.get("tags") or [],
+                    snap.get("transcript"),
+                    snap.get("text"),
+                    snap.get("midi_notes"),
+                    user_id,
+                    snap["file_id"],
+                ),
+            )
+        conn.execute("DELETE FROM last_action WHERE user_id = %s", (user_id,))
+        return len(snapshots)
+
+
+def _serialize_row_for_snapshot(row: dict) -> dict:
+    """Pick only the columns we restore on undo. Strip transient fields."""
+    return {
+        "file_id":    row["file_id"],
+        "slug":       row.get("slug"),
+        "tags":       row.get("tags") or [],
+        "transcript": row.get("transcript"),
+        "text":       row.get("text"),
+        "midi_notes": row.get("midi_notes"),
+    }

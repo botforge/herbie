@@ -4,11 +4,18 @@ Postgres-backed archive tests.
 How to read this file:
 
   1. Each test seeds at least one user via the seed_user fixture.
-  2. ingest_audio copies bytes to <volume>/<user>/raw/<fid>.<ext>
-     and inserts an audio event row.
+  2. ingest_audio / ingest_text both copy bytes / write payload to
+     <volume>/<user>/raw/ and insert an event row.
   3. current_entry returns the row, or {} if absent or soft-deleted.
   4. get_feed returns newest-first audio/text events for the user,
      filtered by tag, paginated.
+  5. get_all_tags counts tag occurrences across live entries.
+  6. delete_file soft-deletes via a delete event.
+  7. search matches case-insensitive substring across slug / tags /
+     transcript / text.
+  8. update_file_meta / update_files_meta mutate rows in place (web PATCH
+     surface only) and snapshot prior state into last_action.
+  9. undo_last_action restores the snapshot and clears the buffer.
 """
 
 from pathlib import Path
@@ -122,3 +129,29 @@ def test_search_matches_slug_tag_text_transcript(
 
     res2 = archive.search(uid, "corridor")
     assert any(e["slug"] == "lyrics-x" for e in res2)
+
+
+def test_update_meta_changes_tags_and_undo_restores(
+    db, seed_user, fake_audio, temp_volume,
+):
+    # 1. Ingest a file with tags ["a", "b"] to use as our target.
+    uid = seed_user("dhruv")
+    ev = archive.ingest_audio(uid, str(fake_audio), "x", ["a", "b"], "ogg", "")
+    fid = ev["file_id"]
+
+    # 2. Patch tags to ["c"] — should return True and the entry should reflect
+    #    the new tag list immediately.
+    assert archive.update_file_meta(uid, fid, tags=["c"]) is True
+    assert archive.current_entry(uid, fid)["tags"] == ["c"]
+
+    # 3. Undo the patch — should restore ["a", "b"] and report 1 row restored.
+    n = archive.undo_last_action(uid)
+    assert n == 1
+    assert archive.current_entry(uid, fid)["tags"] == ["a", "b"]
+
+
+def test_update_meta_unknown_returns_false(db, seed_user, temp_volume):
+    # 1. Attempt to update a file_id that does not exist for the user.
+    # 2. Expect False — no row was matched, so nothing was changed.
+    uid = seed_user("dhruv")
+    assert archive.update_file_meta(uid, "deadbeef", tags=["x"]) is False
