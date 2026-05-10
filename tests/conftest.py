@@ -162,3 +162,7 @@ def _load_fixture_entry(file_id: str) -> dict:
 @pytest.fixture
 def fixture_entry():
     return _load_fixture_entry
+
+
+# DB fixtures (auto-discovered by pytest via star import)
+from tests.conftest_db import *  # noqa: F401,F403
