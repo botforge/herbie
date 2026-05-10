@@ -14,7 +14,8 @@ How to read this file:
      tool. It is the bot's only correction path — appends a text
      event tagged `system-note` (inheriting the target's tags), so
      the user's correction lives in the feed without mutating the
-     original entry.
+     original entry. All archive calls are scoped to a real DB user
+     (seed_user) so no writes escape to the real volume.
 """
 
 from services import archive, llm
@@ -84,31 +85,34 @@ def test_format_filing_confirmation_omits_transcript_line_when_empty():
 
 
 def test_tool_file_system_note_appends_a_correction_without_mutating(
-    temp_archive, fake_audio
+    db, seed_user, fake_audio, temp_volume,
 ):
     """
-    1. File an audio entry with the LLM's initial (wrong) tag guess.
+    1. Seed a user and file an audio entry with the LLM's initial
+       (wrong) tag guess.
     2. Capture the existing tag set and feed length so we can prove
        neither is mutated by the correction.
-    3. Invoke file_system_note with target_file_id pointing at the
-       wrong entry, plus the user's correction text.
+    3. Invoke _tool_file_system_note with user_id, target_file_id
+       pointing at the wrong entry, plus the user's correction text.
     4A. The original entry's tags are UNCHANGED — corrections never
         rewrite the source. The healing agent does that later.
     4B. The feed has grown by exactly one — a new text event tagged
         `system-note` plus the inherited tag set so the correction
         surfaces under the same tag filter as the entry it targets.
     """
+    uid = seed_user("u_llm_note")
     parent = archive.ingest_audio(
+        uid,
         fake_audio,
         slug="religion-customary",
         tags=["underworld", "lyric"],
         ext="ogg",
         transcript="religion is a customary",
     )
-    original_tags = list(archive.current_entry(parent["file_id"])["tags"])
-    pre_feed_len = len(archive.get_feed())
+    original_tags = list(archive.current_entry(uid, parent["file_id"])["tags"])
+    pre_feed_len = len(archive.get_feed(uid))
 
-    result = llm._tool_file_system_note({
+    result = llm._tool_file_system_note(uid, {
         "content": "tag should be monastery, not underworld",
         "target_file_id": parent["file_id"],
     })
@@ -116,9 +120,9 @@ def test_tool_file_system_note_appends_a_correction_without_mutating(
     # 1. Tool result is a 'noted' confirmation string.
     assert "noted" in result
     # 2. Original entry's tags untouched — no in-place mutation.
-    assert archive.current_entry(parent["file_id"])["tags"] == original_tags
+    assert archive.current_entry(uid, parent["file_id"])["tags"] == original_tags
     # 3. Feed grew by one new text event.
-    feed = archive.get_feed()
+    feed = archive.get_feed(uid)
     assert len(feed) == pre_feed_len + 1
     # 4. The new event is a system-note tagged with both the
     #    inherited project tag and `system-note`.
@@ -129,32 +133,38 @@ def test_tool_file_system_note_appends_a_correction_without_mutating(
     assert "monastery, not underworld" in note["text"]
 
 
-def test_tool_file_system_note_works_without_a_target(temp_archive):
+def test_tool_file_system_note_works_without_a_target(
+    db, seed_user, temp_volume,
+):
     """
-    A general correction with no specific entry to point at — e.g.
-    "stop adding the foley tag to everything" — must still file
-    cleanly. target_file_id is omitted, the note carries only the
-    `system-note` tag, and the LLM sees a 'noted' tool result.
+    1. Seed a user with an empty archive.
+    2. A general correction with no specific entry to point at — e.g.
+       "stop adding the foley tag to everything" — must still file
+       cleanly. target_file_id is omitted, the note carries only the
+       `system-note` tag, and the LLM sees a 'noted' tool result.
     """
-    pre_feed_len = len(archive.get_feed())
+    uid = seed_user("u_llm_notarget")
+    pre_feed_len = len(archive.get_feed(uid))
 
-    result = llm._tool_file_system_note({
+    result = llm._tool_file_system_note(uid, {
         "content": "stop adding the foley tag to everything",
     })
 
     assert "noted" in result
-    feed = archive.get_feed()
+    feed = archive.get_feed(uid)
     assert len(feed) == pre_feed_len + 1
     note = feed[0]
     assert note["type"] == "text"
     assert note["tags"] == ["system-note"]
 
 
-def test_tool_file_system_note_rejects_empty_content(temp_archive):
+def test_tool_file_system_note_rejects_empty_content(db, seed_user):
     """
-    Calling file_system_note with no content returns an error
-    string instead of writing a blank event. The LLM reads the
-    error back and can recover by asking the user to elaborate.
+    1. Seed a user.
+    2. Calling _tool_file_system_note with no content returns an error
+       string instead of writing a blank event. The LLM reads the
+       error back and can recover by asking the user to elaborate.
     """
-    result = llm._tool_file_system_note({"content": ""})
+    uid = seed_user("u_llm_empty")
+    result = llm._tool_file_system_note(uid, {"content": ""})
     assert "error" in result.lower()

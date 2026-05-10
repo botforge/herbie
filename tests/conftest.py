@@ -164,5 +164,22 @@ def fixture_entry():
     return _load_fixture_entry
 
 
+# ── 5. temp_volume: redirect VOLUME_ROOT to a temp path ───────────────────────
+#
+#   1. Monkeypatch VOLUME_ROOT inside services.archive to a temp
+#      path so ingest calls create per-user dirs under tmp_path
+#      rather than touching the real volume on disk.
+#   2. Call ensure_archive_root() so the root exists before any
+#      test code runs.
+#   3. Yield the patched VOLUME_ROOT so tests can construct expected
+#      file paths as (temp_volume / uid / "raw" / ...).
+
+@pytest.fixture
+def temp_volume(tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, "VOLUME_ROOT", tmp_path / "v")
+    archive.ensure_archive_root()
+    return tmp_path / "v"
+
+
 # DB fixtures (auto-discovered by pytest via star import)
 from tests.conftest_db import *  # noqa: F401,F403

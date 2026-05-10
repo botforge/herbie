@@ -13,7 +13,8 @@ import re
 from pathlib import Path
 from typing import TypedDict
 
-from services.archive import VOLUME_ROOT, current_entry
+from services import archive as _archive
+from services.archive import current_entry
 
 _AUDIO_MARKER_RE = re.compile(r"\[\[audio:([a-fA-F0-9]{8})\]\]")
 
@@ -72,7 +73,7 @@ def parse_reply(user_id: str, reply: str) -> list[Segment]:
         else:
             ext      = "." + (sc.get("ext") or "ogg").lstrip(".")
             slug     = sc.get("slug") or fid
-            path     = VOLUME_ROOT / user_id / "raw" / f"{fid}{ext}"
+            path     = _archive.VOLUME_ROOT / user_id / "raw" / f"{fid}{ext}"
             filename = f"{slug}{ext}"
             if not path.exists():
                 segments.append({

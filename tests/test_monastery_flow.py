@@ -3,11 +3,12 @@ Integration walkthrough: the monastery scenario.
 
 How to read this file:
 
-  1. Every test below sets up a clean, isolated archive root (the
-     `temp_archive` fixture) and replays a scripted sequence of user
-     actions against the public services.archive API.
+  1. Every test below seeds a real DB user (seed_user fixture),
+     redirects VOLUME_ROOT to a temp path (temp_volume), and replays
+     a scripted sequence of user actions against the public
+     services.archive API.
   2. No LLM, no HTTP, no transcription — the assertions land on the
-     event log, sidecars, and feed state that the web UI and Telegram
+     DB event rows and on-disk raw files that the web UI and Telegram
      bot both render from.
   3. The raw audio used here comes from tests/fixtures/audio/ and is
      owned by the test suite. It never touches the real archive/ on
@@ -26,12 +27,16 @@ custom-marry, tell me why I only ever pray when I'm nervous ...").
 from services import archive
 
 
-def test_ingests_two_monastery_voice_notes(temp_archive, fixture_entry):
+def test_ingests_two_monastery_voice_notes(
+    db, seed_user, fixture_entry, temp_volume,
+):
     """
     After ingesting the first and second monastery voice notes, the feed
     should contain both entries in reverse-chronological order, with
     transcripts, tags, and raw bytes preserved.
     """
+
+    uid = seed_user("u_monastery")
 
     # 1. Load the two test fixture entries.
     #    1A. `first` is the earlier take ("religion-customary-vocal").
@@ -45,10 +50,11 @@ def test_ingests_two_monastery_voice_notes(temp_archive, fixture_entry):
     assert second["slug"] == "religion-custom-marry"
 
     # 2. Ingest both entries into the clean temp archive.
-    #    2A. `ingest_audio` copies raw_path into temp_archive/raw,
-    #        writes a fresh sidecar, and appends an audio event.
+    #    2A. `ingest_audio` copies raw_path into temp_volume/<uid>/raw/,
+    #        writes a fresh event row, and returns the event dict.
     #    2B. The returned dict is the event as it lands in the feed.
     ev1 = archive.ingest_audio(
+        uid,
         first["raw_path"],
         slug=first["slug"],
         tags=first["tags"],
@@ -56,6 +62,7 @@ def test_ingests_two_monastery_voice_notes(temp_archive, fixture_entry):
         transcript=first["transcript"],
     )
     ev2 = archive.ingest_audio(
+        uid,
         second["raw_path"],
         slug=second["slug"],
         tags=second["tags"],
@@ -67,7 +74,7 @@ def test_ingests_two_monastery_voice_notes(temp_archive, fixture_entry):
     #    3A. Feed length is 2 (nothing else was ingested).
     #    3B. get_feed returns newest-first, so the second ingest is
     #        at index 0 and the first is at index 1.
-    feed = archive.get_feed()
+    feed = archive.get_feed(uid)
     assert len(feed) == 2
     assert feed[0]["slug"] == "religion-custom-marry"
     assert feed[1]["slug"] == "religion-customary-vocal"
@@ -84,24 +91,28 @@ def test_ingests_two_monastery_voice_notes(temp_archive, fixture_entry):
     assert "monastery" in feed[0]["tags"]
     assert "monastery" in feed[1]["tags"]
 
-    # 6. Confirm the raw .ogg files physically landed in temp archive.
+    # 6. Confirm the raw .ogg files physically landed in temp volume.
     #    6A. ingest_audio uses shutil.copy2, so the fixture file
     #        itself stays untouched.
-    #    6B. The copy in temp_archive/raw is named by the freshly
-    #        minted file_id, not the fixture's file_id.
-    assert (temp_archive / "raw" / f"{ev1['file_id']}.ogg").exists()
-    assert (temp_archive / "raw" / f"{ev2['file_id']}.ogg").exists()
+    #    6B. The copy lives at temp_volume/<uid>/raw/<file_id>.ogg.
+    assert (temp_volume / uid / "raw" / f"{ev1['file_id']}.ogg").exists()
+    assert (temp_volume / uid / "raw" / f"{ev2['file_id']}.ogg").exists()
 
 
-def test_tag_inheritance_on_derived_files(temp_archive, fake_audio):
+def test_tag_inheritance_on_derived_files(
+    db, seed_user, fake_audio, temp_volume,
+):
     """
     Derived entries (midi output from to_midi, stems from stem_split,
     etc.) inherit every parent tag and append their own type tag. This
     is the invariant soul.md promises under "--- TAG INHERITANCE ---".
     """
 
+    uid = seed_user("u_monastery_inherit")
+
     # 1. File a parent audio entry with four tags.
     parent = archive.ingest_audio(
+        uid,
         fake_audio,
         slug="monastery-op1-melody",
         tags=["op1", "monastery", "melody", "vocal"],
@@ -112,6 +123,7 @@ def test_tag_inheritance_on_derived_files(temp_archive, fake_audio):
     # 2. File a derived text entry (simulating a to_midi job output)
     #    against the parent, carrying only the "midi" type tag.
     derived = archive.ingest_text(
+        uid,
         slug="monastery-op1-melody-midi",
         tags=["midi"],
         text="NOTE C4 0 1\nNOTE E4 1 1",

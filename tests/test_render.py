@@ -1,8 +1,8 @@
 """
 Unit tests for services.render — the LLM-reply parser shared by every
 transport. The parser walks an LLM string, finds [[audio:<8hex>]]
-markers, resolves each one against the archive, and emits a typed
-segment list the transport can dispatch.
+markers, resolves each one against the archive (scoped to user_id),
+and emits a typed segment list the transport can dispatch.
 
 How to read this file:
 
@@ -25,35 +25,39 @@ from services import archive, render
 
 # ── plain text path ─────────────────────────────────────────────────────────
 
-def test_parse_reply_returns_single_text_segment_for_plain_string(temp_archive):
+def test_parse_reply_returns_single_text_segment_for_plain_string():
     """A reply with no markers passes through as one text segment."""
     out = render.parse_reply("any-user", "hello there")
     assert out == [{"kind": "text", "text": "hello there"}]
 
 
-def test_parse_reply_returns_empty_list_for_empty_input(temp_archive):
+def test_parse_reply_returns_empty_list_for_empty_input():
     """Empty string → no segments. Caller decides how to handle silence."""
     assert render.parse_reply("any-user", "") == []
 
 
 # ── resolved marker ─────────────────────────────────────────────────────────
 
-def test_parse_reply_resolves_marker_to_audio_segment(temp_archive, fake_audio):
+def test_parse_reply_resolves_marker_to_audio_segment(
+    db, seed_user, fake_audio, temp_volume,
+):
     """
-    1. File a real audio entry so the marker has something to resolve to.
+    1. Seed a test user and file a real audio entry so the marker has
+       something to resolve to.
     2. Wrap a marker in surrounding prose so we exercise the
        text-then-audio-then-text path.
     3. Three segments come back in order: leading text, audio
        (with on-disk path and a slug-derived filename), trailing text.
     """
+    uid = seed_user("u_render")
     ev   = archive.ingest_audio(
-        fake_audio, slug="religion-customary",
+        uid, fake_audio, slug="religion-customary",
         tags=["monastery"], ext="ogg", transcript="r is c",
     )
     fid  = ev["file_id"]
     text = f"here it is\n[[audio:{fid[:8]}]]\nhope that helps"
 
-    segs = render.parse_reply(text)
+    segs = render.parse_reply(uid, text)
 
     assert [s["kind"] for s in segs] == ["text", "audio", "text"]
     assert segs[0]["text"] == "here it is\n"
@@ -65,31 +69,37 @@ def test_parse_reply_resolves_marker_to_audio_segment(temp_archive, fake_audio):
 
 # ── failure modes ──────────────────────────────────────────────────────────
 
-def test_parse_reply_emits_audio_miss_for_unknown_file_id(temp_archive):
-    """An LLM hallucinated marker shouldn't crash — emit audio_miss."""
-    segs = render.parse_reply("[[audio:deadbeef]]")
+def test_parse_reply_emits_audio_miss_for_unknown_file_id(db, seed_user):
+    """
+    1. Seed a user with no archive entries.
+    2. An LLM hallucinated marker shouldn't crash — emit audio_miss
+       with reason='no_entry'.
+    """
+    uid = seed_user("u_miss")
+    segs = render.parse_reply(uid, "[[audio:deadbeef]]")
     assert len(segs) == 1
     assert segs[0] == {"kind": "audio_miss", "file_id": "deadbeef", "reason": "no_entry"}
 
 
 def test_parse_reply_emits_audio_miss_when_raw_file_was_deleted_off_disk(
-    temp_archive, fake_audio
+    db, seed_user, fake_audio, temp_volume,
 ):
     """
-    1. File a real audio entry, then delete the on-disk bytes
-       directly (sidecar event still present, raw file gone).
+    1. Seed a user and file a real audio entry, then delete the on-disk
+       bytes directly (DB event still present, raw file gone).
     2. parse_reply should detect the missing file and emit
        audio_miss with reason='file_missing' — distinct from
        no_entry so transports can show different fallbacks.
     """
+    uid = seed_user("u_ghost")
     ev  = archive.ingest_audio(
-        fake_audio, slug="ghost", tags=["x"],
+        uid, fake_audio, slug="ghost", tags=["x"],
         ext="ogg", transcript="",
     )
     fid = ev["file_id"]
-    (archive.RAW_DIR / f"{fid}.ogg").unlink()
+    (temp_volume / uid / "raw" / f"{fid}.ogg").unlink()
 
-    segs = render.parse_reply(f"[[audio:{fid[:8]}]]")
+    segs = render.parse_reply(uid, f"[[audio:{fid[:8]}]]")
 
     assert len(segs) == 1
     assert segs[0]["kind"] == "audio_miss"
