@@ -515,18 +515,30 @@ Captured here so the Phase 1 design doesn't block them later:
 
 ---
 
-## Open questions for the owner
+## Decisions locked in by the owner
 
-These are deferred until implementation; flagged here so they don't get
-silently picked.
+1. **Telegram bot:** reuse the existing bot token in `.env`. Don't
+   create a new one. Implication: the local laptop bot must be stopped
+   before the cloud bot starts polling, or both will race for updates
+   and one will see "Conflict: terminated by other getUpdates request"
+   from Telegram. The cutover step in the migration plan handles this.
+2. **Initial credentials:** seed a default username/password during
+   first deploy so the owner can log in immediately. The owner rotates
+   the password from the UI (or via `python -m services.users
+   set-password`) afterward. Defaults:
+   - username: `dhruv`
+   - password: a random URL-safe 16-char string printed once to the
+     deploy logs and also written to a file the owner can `flyctl ssh`
+     to retrieve. Never committed to git.
+
+## Open questions still pending (non-blocking — pick at deploy time)
 
 1. **Domain:** `lila.fly.dev` (free, instant) vs custom domain (1-day
    DNS setup)?
 2. **Region:** which Fly region — `iad` (US East), `sjc` (US West),
    `lhr` (UK)?
-3. **Initial username:** confirm `dhruv` or pick another.
-4. **Whisper model size:** stay on `base` (~140MB, fast, decent
+3. **Whisper model size:** stay on `base` (~140MB, fast, decent
    transcripts) or upgrade to `small`/`medium` for better accuracy?
    Larger models slow down audio ingest.
-5. **Slash-command surface:** the existing slash commands in the web UI
+4. **Slash-command surface:** the existing slash commands in the web UI
    stay, or get retired? (Not a blocker; either is fine.)
