@@ -17,6 +17,21 @@ destination = "/data"
 web      = "uvicorn main:app --host 0.0.0.0 --port 8080"
 telegram = "python telegram_bot.py"
 
+# Machine sizes. Default would be shared-cpu-1x / 256MB, which OOMs
+# the first time faster-whisper loads the base model (~140MB of model
+# weights plus inference RAM). Both processes transcribe audio
+# in-process (web via /ingest/audio, telegram via handle_voice →
+# pipeline.handle_audio), so both need the same Whisper headroom.
+[[vm]]
+processes = ["web"]
+size      = "shared-cpu-1x"
+memory    = "1gb"
+
+[[vm]]
+processes = ["telegram"]
+size      = "shared-cpu-1x"
+memory    = "1gb"
+
 [[services]]
 processes      = ["web"]
 internal_port  = 8080
